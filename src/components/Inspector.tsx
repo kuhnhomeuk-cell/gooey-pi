@@ -5,6 +5,7 @@ import type { AgentBrowserTabRecord, AutomationScheduleRecord, GitStatus, Inspec
 import type { AgentSlotRect } from './AgentBrowserLayer'
 import { BrowserPanel } from './inspector/BrowserPanel'
 import { ChangesPanel } from './inspector/ChangesPanel'
+import { FactoryPanel } from './inspector/FactoryPanel'
 import { FilesPanel } from './inspector/FilesPanel'
 import { SummaryPanel } from './inspector/SummaryPanel'
 import { IconButton, useFocusTrap } from './ui'
@@ -45,7 +46,7 @@ interface InspectorProps {
   overlay?: boolean
 }
 
-const tabs: Array<{ id: InspectorTab; label: string }> = [{ id: 'summary', label: 'Summary' }, { id: 'changes', label: 'Changes' }, { id: 'browser', label: 'Browser' }, { id: 'files', label: 'Files' }]
+const tabs: Array<{ id: InspectorTab; label: string }> = [{ id: 'summary', label: 'Summary' }, { id: 'changes', label: 'Changes' }, { id: 'browser', label: 'Browser' }, { id: 'files', label: 'Files' }, { id: 'factory', label: 'Factory' }]
 
 export function Inspector({ activeTab, onTabChange, onClose, agentName, shortName, project, cwd, runtime, messages, git, automations, heartbeats, onOpenAutomation, browserHome, browserAnnotations, agentBrowserTabs, activeAgentTabId, agentPreviewSelected, onSelectAgentTab, onCloseAgentTab, onShowBrowserPreview, onAgentSlotRect, agentSessionKey, onPreviewContext, previewPointerEvent, onNavigateAgentTab, onRefreshGit, onOpenExternal, onRevealPath, overlay = false, platform = 'darwin' }: InspectorProps) {
   const inspectorRef = useFocusTrap<HTMLElement>(overlay, onClose)
@@ -71,6 +72,7 @@ export function Inspector({ activeTab, onTabChange, onClose, agentName, shortNam
       {activeTab === 'changes' ? <ChangesPanel key={cwd ?? 'no-workspace'} cwd={cwd} git={git} onRefreshGit={onRefreshGit}/> : null}
       {activeTab === 'browser' ? <BrowserPanel platform={platform} home={browserHome} onOpenExternal={onOpenExternal} annotations={browserAnnotations} agentTabs={agentBrowserTabs} activeAgentTabId={activeAgentTabId} previewSelected={agentPreviewSelected} onSelectAgentTab={onSelectAgentTab} onCloseAgentTab={onCloseAgentTab} onShowPreview={onShowBrowserPreview} onAgentSlotRect={onAgentSlotRect} agentSessionKey={agentSessionKey} onPreviewContext={onPreviewContext} previewPointerEvent={previewPointerEvent} onNavigateAgentTab={onNavigateAgentTab}/> : null}
       {activeTab === 'files' ? <FilesPanel project={project} git={git} onReveal={onRevealPath}/> : null}
+      {activeTab === 'factory' ? <FactoryPanel/> : null}
     </div>
   </aside>
 }

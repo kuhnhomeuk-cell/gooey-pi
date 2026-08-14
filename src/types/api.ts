@@ -7,7 +7,7 @@ export const BROWSER_PARTITION = 'persist:prime-work-browser'
 
 export type ThemeMode = 'system' | 'light' | 'dark'
 export type WorkspaceView = 'session' | 'projects' | 'activity' | 'scheduled' | 'plugins' | 'settings'
-export type InspectorTab = 'summary' | 'changes' | 'browser' | 'files'
+export type InspectorTab = 'summary' | 'changes' | 'browser' | 'files' | 'factory'
 export type SessionStatus = 'idle' | 'running' | 'waiting' | 'complete' | 'failed' | 'unknown'
 
 export const HARNESS_IDS = ['omp', 'prime', 'pi'] as const
