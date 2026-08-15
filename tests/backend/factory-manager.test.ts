@@ -333,23 +333,43 @@ describe('FactoryManager', () => {
     const root = factoryProject()
     const ports: number[] = []
     const children: ChildProcess[] = []
+    const firstHealthSignals: AbortSignal[] = []
     let nextPort = 4619
-    const health = abortableFetch()
     const manager = new FactoryManager({
       bun: '/usr/local/bin/bun',
       allocatePort: async () => {
+        if (ports.length >= 1) {
+          const previous = children[0]
+          expect(previous, 'first child must exit and release its port before the next bind').toBeDefined()
+          expect(previous?.exitCode !== null || previous?.signalCode !== null).toBe(true)
+        }
         const port = nextPort++
         ports.push(port)
         return port
       },
       delay: async () => undefined,
-      fetch: health.fetch,
+      fetch: ((url, init) => {
+        const port = new URL(String(url)).port
+        if (port === '4619') {
+          const signal = init?.signal
+          if (!signal) return Promise.reject(new Error('health fetch is missing an AbortSignal'))
+          firstHealthSignals.push(signal)
+          return new Promise<Response>((_resolve, reject) => {
+            const fail = () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))
+            if (signal.aborted) return fail()
+            signal.addEventListener('abort', fail, { once: true })
+          })
+        }
+        return Promise.resolve(new Response('ok', { status: 200 }))
+      }) as typeof fetch,
       spawn: (() => {
         const child = fakeChild()
         children.push(child)
         if (children.length === 1) {
           queueMicrotask(() => {
             child.emit('error', Object.assign(new Error('spawn EACCES'), { code: 'EACCES' }))
+            Object.assign(child, { exitCode: 1 })
+            child.emit('close', 1, null)
           })
         }
         return child
@@ -365,7 +385,8 @@ describe('FactoryManager', () => {
     const retry = await manager.ensure(root)
     expect(retry).toEqual({ state: 'starting' })
     await waitUntil(() => children.length === 2 && ports.length === 2)
-    health.resolve(new Response('ok', { status: 200 }))
+    expect(children[0]?.exitCode).not.toBeNull()
+    expect(firstHealthSignals.some((signal) => signal.aborted)).toBe(true)
     await first
     await waitForStatus(manager, root, (status) => status.state === 'running')
     await expect(manager.status(root)).resolves.toEqual({ state: 'running', url: `http://127.0.0.1:${ports[1]}` })

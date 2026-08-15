@@ -157,7 +157,7 @@ function processFailed(result: ProcessResult, fallback: string): string | undefi
 
 export class FactoryManager {
   private readonly entries = new Map<string, FactoryEntry>()
-  private readonly boots = new Map<string, BootRecord>()
+  private readonly boots = new Map<string, BootRecord[]>()
   private readonly generations = new Map<string, number>()
   private readonly healthAborts = new Map<string, Set<AbortController>>()
   private closed = false
@@ -205,16 +205,16 @@ export class FactoryManager {
 
   async stop(projectPath: string): Promise<void> {
     const root = await canonicalize(projectPath)
-    const boot = this.invalidate(root)
+    const boots = this.invalidate(root)
     const entry = this.entries.get(root)
     this.entries.delete(root)
     if (entry?.child) await this.killChild(entry.child)
-    if (boot) await boot.promise
+    await Promise.all(boots.map((boot) => boot.promise))
   }
 
   async stopAll(): Promise<void> {
     this.closed = true
-    const boots = [...this.boots.values()]
+    const boots = [...this.boots.values()].flat()
     const entries = [...this.entries.values()]
     for (const root of [...this.generations.keys(), ...this.entries.keys(), ...this.boots.keys()]) this.bumpGeneration(root)
     this.abortAllHealth()
@@ -224,29 +224,44 @@ export class FactoryManager {
     await Promise.all(boots.map((boot) => boot.promise))
   }
 
+  private latestBoot(root: string): BootRecord | undefined {
+    const records = this.boots.get(root)
+    return records?.[records.length - 1]
+  }
+
   private beginBoot(root: string): void {
     const current = this.generations.get(root) ?? 0
-    const inFlight = this.boots.get(root)
+    const inFlight = this.latestBoot(root)
     const existing = this.entries.get(root)
     // A boot that already published 'error' may still be in flight (cleanup).
     // Retry must replace that stale entry with 'starting' now, not return it.
     if (inFlight && inFlight.generation === current && existing?.state !== 'error') return
+    const previousChild = existing?.child
+    // Lose ownership first so the disowned boot will not touch the shared entry,
+    // then abort its health fetch and kill its child before publishing 'starting'.
     const generation = this.bumpGeneration(root)
+    this.abortHealth(root)
+    if (previousChild) void this.killChild(previousChild)
     if (existing) {
       this.entries.set(root, { port: 0, state: 'starting', generation })
     }
-    const promise = this.boot(root, generation).finally(() => {
-      const record = this.boots.get(root)
-      if (record?.promise === promise) this.boots.delete(root)
+    const promise = this.boot(root, generation, previousChild).finally(() => {
+      const records = this.boots.get(root)
+      if (!records) return
+      const remaining = records.filter((record) => record.promise !== promise)
+      if (remaining.length > 0) this.boots.set(root, remaining)
+      else this.boots.delete(root)
     })
-    this.boots.set(root, { generation, promise })
+    const records = this.boots.get(root)
+    if (records) records.push({ generation, promise })
+    else this.boots.set(root, [{ generation, promise }])
   }
 
-  private invalidate(root: string): BootRecord | undefined {
-    const boot = this.boots.get(root)
+  private invalidate(root: string): BootRecord[] {
+    const boots = [...(this.boots.get(root) ?? [])]
     this.bumpGeneration(root)
     this.abortHealth(root)
-    return boot
+    return boots
   }
 
   private bumpGeneration(root: string): number {
@@ -354,7 +369,8 @@ export class FactoryManager {
     })
   }
 
-  private async boot(root: string, generation: number): Promise<void> {
+  private async boot(root: string, generation: number, previousChild?: ChildProcess): Promise<void> {
+    if (previousChild) await this.killChild(previousChild)
     if (!this.owns(root, generation)) return
     if (!(await this.detect(root))) {
       if (this.owns(root, generation)) {
@@ -371,6 +387,7 @@ export class FactoryManager {
       this.entries.set(root, entry)
     }
 
+    let child: ChildProcess | undefined
     try {
       const visualizer = join(root, '.claude', 'skills', 'sssf', 'apps', 'visualizer')
       if (!(await directoryExists(visualizer))) throw new Error('Factory visualizer is missing')
@@ -411,7 +428,7 @@ export class FactoryManager {
         windowsHide: true,
         detached: process.platform !== 'win32',
       }
-      const child = this.spawnFn(bun, ['run', 'server/index.ts'], options)
+      child = this.spawnFn(bun, ['run', 'server/index.ts'], options)
       entry.child = child
       registerChildProcess(child)
       child.once('close', () => {
@@ -432,10 +449,16 @@ export class FactoryManager {
       if (!isChildAlive(child)) throw new Error('Factory watch-screen exited unexpectedly')
       entry.state = 'running'
     } catch (error) {
-      if (!this.owns(root, generation, entry)) return
-      entry.state = 'error'
-      entry.message = error instanceof Error ? error.message : String(error)
-      if (entry.child) await this.killChild(entry.child)
+      if (this.owns(root, generation, entry)) {
+        entry.state = 'error'
+        entry.message = error instanceof Error ? error.message : String(error)
+      }
+    } finally {
+      // Ownership loss means do not touch the shared entry. The disowned boot
+      // still owns its child and must tear it down so the port is released.
+      if (child && (!this.owns(root, generation, entry) || entry.state === 'error')) {
+        await this.killChild(child)
+      }
     }
   }
 }
