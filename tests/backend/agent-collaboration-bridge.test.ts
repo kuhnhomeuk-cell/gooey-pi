@@ -122,6 +122,30 @@ async function fixture(live = true, targetTranscript: TranscriptMessage[] = defa
 }
 
 describe('AgentCollaborationBridge', () => {
+  it('revokes a runtime claim and clears its cached and pending session bindings', async () => {
+    const { bridge, call, environment } = await fixture()
+    const token = environment.GOOEYPI_COLLABORATION_TOKEN!
+    const active = bridge.environmentFor({ cwd: '/project', sessionPath: source.filePath, harness: 'prime' })
+    await expect(call('list')).resolves.toMatchObject({ status: 200 })
+    bridge.bindSession(token, undefined, 'runtime-pending')
+
+    const state = bridge as unknown as {
+      sourcesByToken: Map<string, unknown>
+      pendingRuntimeTokens: Map<string, string>
+    }
+    expect(state.sourcesByToken.has(token)).toBe(true)
+    expect(state.pendingRuntimeTokens.get('runtime-pending')).toBe(token)
+
+    expect(bridge.revoke(token)).toBe(true)
+    expect(bridge.revoke(token)).toBe(false)
+    expect(state.sourcesByToken.has(token)).toBe(false)
+    expect(state.pendingRuntimeTokens.has('runtime-pending')).toBe(false)
+    bridge.bindSession(token, undefined, 'runtime-late')
+    expect(state.pendingRuntimeTokens.has('runtime-late')).toBe(false)
+    await expect(call('list')).resolves.toMatchObject({ status: 401 })
+    await expect(call('list', {}, active.GOOEYPI_COLLABORATION_TOKEN)).resolves.toMatchObject({ status: 200 })
+  })
+
   it('lists and reads only same-project peers through bounded snapshots', async () => {
     const { call, environment } = await fixture()
     expect(environment.GOOEYPI_COLLABORATION_EXTENSION_PATH).toBe('/app/extensions/omp-work-collaboration.ts')
@@ -314,6 +338,48 @@ describe('AgentCollaborationBridge', () => {
     const completed = await first
     expect(completed.body.result).toMatchObject({ timed_out: true })
     expect(primeSessions.read.mock.calls.length - readsBefore).toBeLessThanOrEqual(2)
+  })
+
+  it('re-arms an early timeout wake without polling the transcript early', async () => {
+    const { call, primeSessions } = await fixture()
+    const read = await call('read', { target_session_id: target.id })
+    const cursor = (read.body.result as Record<string, unknown>).cursor
+    const readsBefore = primeSessions.read.mock.calls.length
+    const nativeSetTimeout = globalThis.setTimeout
+    const timer = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
+      const requested = Number(delay ?? 0)
+      return nativeSetTimeout(callback, requested > 25 && requested <= 150 ? requested - 25 : requested, ...args)
+    }) as typeof setTimeout)
+
+    try {
+      const completed = await call('wait', { target_session_id: target.id, after_cursor: cursor, timeout_ms: 150 })
+      expect(completed.body.result).toMatchObject({ timed_out: true })
+      expect(primeSessions.read.mock.calls.length - readsBefore).toBeLessThanOrEqual(2)
+    } finally {
+      timer.mockRestore()
+    }
+  })
+
+  it('reports a transcript change found by the final deadline snapshot', async () => {
+    const changedTranscript: TranscriptMessage[] = [
+      ...defaultTargetTranscript,
+      { id: 'a2', role: 'assistant', parts: [{ type: 'text', text: 'The deadline update is ready.' }] },
+    ]
+    const { call, primeSessions } = await fixture()
+    let reads = 0
+    primeSessions.read.mockImplementation(async () => {
+      reads += 1
+      return reads >= 3 ? changedTranscript : defaultTargetTranscript
+    })
+    const read = await call('read', { target_session_id: target.id })
+    const cursor = (read.body.result as Record<string, unknown>).cursor
+
+    const completed = await call('wait', { target_session_id: target.id, after_cursor: cursor, timeout_ms: 50 })
+
+    expect(completed.body.result).toMatchObject({ timed_out: false })
+    expect((completed.body.result as Record<string, unknown>).messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'a2', text: 'The deadline update is ready.' }),
+    ]))
   })
 
   it('wakes an offline target while rejecting missing source scope and invalid tokens', async () => {

@@ -84,7 +84,10 @@ export interface SessionRecord {
   depth: number
   pinned?: boolean
   unread?: boolean
+  /** Monotonic renderer lifecycle revision used to distinguish attention events. */
   eventRevision?: number
+  /** Lifecycle revision that authored the current status; absent when the catalog owns it. */
+  statusEventRevision?: number
   preview?: string
   archived?: boolean
   syncRevision?: number
@@ -526,7 +529,7 @@ export interface VoiceToolResult {
 }
 
 export type ScheduleDefinitionStatus = 'active' | 'paused' | 'completed' | 'blocked'
-export type ScheduleRunStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'skipped' | 'interrupted'
+export type ScheduleRunStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'skipped' | 'interrupted' | 'cancelled'
 export type ScheduleCreatedBy = 'user' | 'agent'
 
 export type ScheduleTarget =
