@@ -171,6 +171,12 @@ function waitForChildren(children: ChildProcess[], timeoutMs: number): Promise<v
   return Promise.all(children.map((child) => waitForProcessExit(child, timeoutMs))).then(() => undefined)
 }
 
+/** Track a long-lived child so stopChildProcesses()/before-quit teardown kills it. */
+export function registerChildProcess(child: ChildProcess): void {
+  activeChildren.add(child)
+  child.once('close', () => { activeChildren.delete(child) })
+}
+
 export async function stopChildProcesses(): Promise<void> {
   // Close admission (including queued work) before taking the snapshot so no
   // later one-shot child can escape cleanup.
