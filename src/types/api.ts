@@ -9,6 +9,13 @@ export type ThemeMode = 'system' | 'light' | 'dark'
 export type WorkspaceView = 'session' | 'projects' | 'activity' | 'scheduled' | 'plugins' | 'settings'
 export type InspectorTab = 'summary' | 'changes' | 'browser' | 'files' | 'factory'
 export type SessionStatus = 'idle' | 'running' | 'waiting' | 'complete' | 'failed' | 'unknown'
+export type FactoryState = 'none' | 'installing' | 'starting' | 'running' | 'error'
+
+export interface FactoryStatus {
+  state: FactoryState
+  url?: string
+  message?: string
+}
 
 export const HARNESS_IDS = ['omp', 'prime', 'pi'] as const
 export type HarnessId = (typeof HARNESS_IDS)[number]
@@ -727,6 +734,10 @@ export interface PrimeWorkApi {
     onExit(callback: (event: TerminalExitEvent) => void): () => void
   }
   git: { status(cwd: string): Promise<GitStatus>; diff(cwd: string, path?: string, staged?: boolean): Promise<GitDiff>; stage(cwd: string, paths: string[]): Promise<boolean>; unstage(cwd: string, paths: string[]): Promise<boolean>; restore(cwd: string, paths: string[]): Promise<boolean>; commit(cwd: string, message: string): Promise<ProcessOutcome> }
+  factory: {
+    status(projectPath: string): Promise<FactoryStatus>
+    ensure(projectPath: string): Promise<FactoryStatus>
+  }
   plugins: {
     list(projectPath?: string, harness?: HarnessId): Promise<PluginCatalog>
     install(source: string, harness?: HarnessId): Promise<ProcessOutcome>

@@ -10,6 +10,7 @@ import { installApplicationMenu } from './application-menu'
 import { BrowserDownloadGuard } from './browser-downloads'
 import { installCrashGuards } from './crash-guard'
 import { CuaDriverService } from './cua-driver'
+import { FactoryManager } from './factory-manager'
 import { GitService } from './git'
 import { isTrustedRendererUrl, registerIpc, type IpcRegistration } from './ipc'
 import { HarnessDiscoveryService, reconcileActiveHarness } from './harness-discovery'
@@ -55,6 +56,7 @@ let agentScheduleBridges: AgentScheduleBridge[] = []
 let agentBrowser: AgentBrowserService | null = null
 let agentBrowserBridge: AgentBrowserBridge | null = null
 let agentCollaborationBridge: AgentCollaborationBridge | null = null
+let factoryManager: FactoryManager | null = null
 let shutdownStarted = false
 let shutdownApproved = false
 let confirmingShutdown = false
@@ -71,7 +73,7 @@ installCrashGuards({
     ompAgents?.beginShutdown()
     piAgents?.beginShutdown()
     beginProcessShutdown()
-    await Promise.allSettled([agents?.stopAll() ?? Promise.resolve(), ompAgents?.stopAll() ?? Promise.resolve(), piAgents?.stopAll() ?? Promise.resolve(), stopChildProcesses()])
+    await Promise.allSettled([agents?.stopAll() ?? Promise.resolve(), ompAgents?.stopAll() ?? Promise.resolve(), piAgents?.stopAll() ?? Promise.resolve(), factoryManager?.stopAll() ?? Promise.resolve(), stopChildProcesses()])
   },
 })
 
@@ -539,6 +541,8 @@ async function bootstrap(): Promise<void> {
     }
   }
   const git = new GitService(authorizeEitherCwd)
+  const factory = new FactoryManager()
+  factoryManager = factory
   // This matches the renderer's startup query so both consumers share SessionService's coalesced catalog scan.
   const listCatalogSessions = (): ReturnType<SessionService['list']> => sessions.list(undefined, true)
 
@@ -921,7 +925,7 @@ async function bootstrap(): Promise<void> {
   }
   trustedRendererUrl = resolveRendererUrl()
   ipc = registerIpc({
-    meta, refreshHarnesses, projects, sessions, agents, terminals, git, plugins, providers, settings, updates, cuaDriver, heartbeats, schedules, browser: browserService, voice, pets,
+    meta, refreshHarnesses, projects, sessions, agents, terminals, git, factory, plugins, providers, settings, updates, cuaDriver, heartbeats, schedules, browser: browserService, voice, pets,
     popupApplicationMenu, setTitleBarTheme,
     omp: { projects: ompProjects, sessions: ompSessions, agents: ompManager, catalog: ompCatalog, plugins: ompPlugins },
     pi: { projects: piProjects, sessions: piSessions, agents: piManager, catalog: piCatalog, plugins: piPlugins },
@@ -1047,6 +1051,7 @@ app.on('before-quit', (event) => {
     agents?.stopAll() ?? Promise.resolve(),
     ompAgents?.stopAll() ?? Promise.resolve(),
     piAgents?.stopAll() ?? Promise.resolve(),
+    factoryManager?.stopAll() ?? Promise.resolve(),
     stopChildProcesses(),
   ]).then(async () => {
     // Await the drain so the final persist lands before the process exits.
