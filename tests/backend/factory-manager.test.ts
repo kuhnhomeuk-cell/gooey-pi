@@ -329,6 +329,51 @@ describe('FactoryManager', () => {
     await manager.stopAll()
   })
 
+  it('records an async child error while boot is in flight and allows retry', async () => {
+    const root = factoryProject()
+    const ports: number[] = []
+    const children: ChildProcess[] = []
+    let nextPort = 4619
+    const health = abortableFetch()
+    const manager = new FactoryManager({
+      bun: '/usr/local/bin/bun',
+      allocatePort: async () => {
+        const port = nextPort++
+        ports.push(port)
+        return port
+      },
+      delay: async () => undefined,
+      fetch: health.fetch,
+      spawn: (() => {
+        const child = fakeChild()
+        children.push(child)
+        if (children.length === 1) {
+          queueMicrotask(() => {
+            child.emit('error', Object.assign(new Error('spawn EACCES'), { code: 'EACCES' }))
+          })
+        }
+        return child
+      }) as typeof import('node:child_process').spawn,
+    })
+
+    const first = manager.ensure(root)
+    await waitUntil(() => children.length === 1)
+    await waitForStatus(manager, root, (status) => status.state === 'error')
+    await expect(manager.status(root)).resolves.toEqual({ state: 'error', message: 'spawn EACCES' })
+    expect(ports).toHaveLength(1)
+
+    const retry = await manager.ensure(root)
+    expect(retry).toEqual({ state: 'starting' })
+    await waitUntil(() => children.length === 2 && ports.length === 2)
+    health.resolve(new Response('ok', { status: 200 }))
+    await first
+    await waitForStatus(manager, root, (status) => status.state === 'running')
+    await expect(manager.status(root)).resolves.toEqual({ state: 'running', url: `http://127.0.0.1:${ports[1]}` })
+    expect(children).toHaveLength(2)
+    expect(ports).toEqual([4619, 4620])
+    await manager.stopAll()
+  })
+
   it('aborts a hanging health fetch when stop is called', async () => {
     const root = factoryProject()
     const signals: AbortSignal[] = []

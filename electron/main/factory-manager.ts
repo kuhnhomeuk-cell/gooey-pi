@@ -227,9 +227,12 @@ export class FactoryManager {
   private beginBoot(root: string): void {
     const current = this.generations.get(root) ?? 0
     const inFlight = this.boots.get(root)
-    if (inFlight && inFlight.generation === current) return
+    const existing = this.entries.get(root)
+    // A boot that already published 'error' may still be in flight (cleanup).
+    // Retry must replace that stale entry with 'starting' now, not return it.
+    if (inFlight && inFlight.generation === current && existing?.state !== 'error') return
     const generation = this.bumpGeneration(root)
-    if (this.entries.has(root)) {
+    if (existing) {
       this.entries.set(root, { port: 0, state: 'starting', generation })
     }
     const promise = this.boot(root, generation).finally(() => {
