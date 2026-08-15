@@ -312,6 +312,89 @@ describe('shell-facing app handlers', () => {
   })
 })
 
+describe('factory IPC authorization', () => {
+  const expectedUrl = 'prime-work://app/'
+  let handlers: Map<string, (event: unknown, ...args: unknown[]) => unknown>
+  let event: { sender: { id: number; isDestroyed: () => boolean; getURL: () => string; mainFrame: { url: string } }; senderFrame: { url: string } }
+
+  function deny(): Promise<string> {
+    return Promise.reject(new Error('path is not inside an added Prime project or its folder identity changed'))
+  }
+
+  function register(overrides: Record<string, unknown> = {}) {
+    handlers = new Map()
+    electronMocks.ipcMain.handle.mockImplementation((channel: string, listener: (event: unknown, ...args: unknown[]) => unknown) => {
+      handlers.set(channel, listener)
+    })
+    const sender = {
+      id: 11,
+      isDestroyed: () => false,
+      getURL: () => expectedUrl,
+      mainFrame: { url: expectedUrl },
+    }
+    event = { sender, senderFrame: sender.mainFrame }
+    const services = {
+      meta: {},
+      projects: { ...serviceStub(), authorizeCwd: vi.fn(deny) },
+      sessions: { ...serviceStub(), onDidChange: vi.fn(() => () => undefined) },
+      agents: serviceStub(),
+      terminals: serviceStub(),
+      git: serviceStub(),
+      plugins: serviceStub(),
+      settings: serviceStub(),
+      schedules: serviceStub(),
+      browser: { ...serviceStub(), onDidChange: vi.fn(() => vi.fn()), onPointer: vi.fn(() => vi.fn()), onActivity: vi.fn(() => vi.fn()) },
+      omp: { ...harnessStub(), projects: { ...serviceStub(), authorizeCwd: vi.fn(deny) } },
+      pi: { ...harnessStub(), projects: { ...serviceStub(), authorizeCwd: vi.fn(deny) } },
+      factory: { status: vi.fn(async () => ({ state: 'none' })), ensure: vi.fn(async () => ({ state: 'none' })) },
+      ...overrides,
+    }
+    const registration = registerIpc(services as never, expectedUrl)
+    registration.authorize(sender as never)
+    return { registration, services }
+  }
+
+  it('passes the authorized project root to factory:ensure and factory:status', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'prime-work-factory-'))
+    try {
+      const authorizeCwd = vi.fn(async () => `${dir}/canonical`)
+      const factory = { status: vi.fn(async () => ({ state: 'none' })), ensure: vi.fn(async () => ({ state: 'starting' })) }
+      const { registration } = register({ projects: { ...serviceStub(), authorizeCwd }, factory })
+      await expect(handlers.get('factory:ensure')!(event, dir)).resolves.toEqual({ state: 'starting' })
+      await expect(handlers.get('factory:status')!(event, dir)).resolves.toEqual({ state: 'none' })
+      expect(authorizeCwd).toHaveBeenCalledWith(dir)
+      expect(factory.ensure).toHaveBeenCalledWith(`${dir}/canonical`)
+      expect(factory.status).toHaveBeenCalledWith(`${dir}/canonical`)
+      registration.dispose()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('does not call FactoryManager when every harness denies the path', async () => {
+    const factory = { status: vi.fn(async () => ({ state: 'none' })), ensure: vi.fn(async () => ({ state: 'none' })) }
+    const { registration } = register({ factory })
+    await expect(handlers.get('factory:ensure')!(event, '/tmp/untrusted-factory')).rejects.toThrow(/not inside an added Prime project/)
+    await expect(handlers.get('factory:status')!(event, '/tmp/untrusted-factory')).rejects.toThrow(/not inside an added Prime project/)
+    expect(factory.ensure).not.toHaveBeenCalled()
+    expect(factory.status).not.toHaveBeenCalled()
+    registration.dispose()
+  })
+
+  it('falls back to omp then pi project authorization', async () => {
+    const factory = { status: vi.fn(async () => ({ state: 'none' })), ensure: vi.fn(async () => ({ state: 'running', url: 'http://127.0.0.1:9' })) }
+    const ompAuthorize = vi.fn(async () => '/omp/root')
+    const { registration } = register({
+      factory,
+      omp: { ...harnessStub(), projects: { ...serviceStub(), authorizeCwd: ompAuthorize } },
+    })
+    await expect(handlers.get('factory:ensure')!(event, '/omp/root')).resolves.toEqual({ state: 'running', url: 'http://127.0.0.1:9' })
+    expect(ompAuthorize).toHaveBeenCalledWith('/omp/root')
+    expect(factory.ensure).toHaveBeenCalledWith('/omp/root')
+    registration.dispose()
+  })
+})
+
 describe('IPC registration lifecycle', () => {
   function servicesWithUnsubscribe(unsubscribe: () => void): Record<string, unknown> {
     return {

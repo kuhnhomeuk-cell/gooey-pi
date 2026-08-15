@@ -89,6 +89,10 @@ const api: PrimeWorkApi = {
     onData: (callback) => subscribe<TerminalDataEvent>('terminal:data', callback),
     onExit: (callback) => subscribe<TerminalExitEvent>('terminal:exit', callback),
   },
+  factory: {
+    status: (projectPath) => ipcRenderer.invoke('factory:status', projectPath),
+    ensure: (projectPath) => ipcRenderer.invoke('factory:ensure', projectPath),
+  },
   git: {
     status: (cwd) => ipcRenderer.invoke('git:status', cwd),
     diff: (cwd, path, staged) => ipcRenderer.invoke('git:diff', cwd, path, staged),

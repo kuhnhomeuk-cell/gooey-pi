@@ -3,6 +3,7 @@ import type { ApplicationMenuName, AppMeta, HarnessId, SessionChangeEvent, Theme
 import type { AgentRpcManager } from './agent-rpc'
 import type { GitService } from './git'
 import type { CuaDriverService } from './cua-driver'
+import type { FactoryManager } from './factory-manager'
 import type { ModelCatalogProvider } from './model-catalog'
 import type { PluginService } from './plugins'
 import type { PetService } from './pets'
@@ -33,6 +34,7 @@ interface Services {
   settings: SettingsService
   updates: UpdateService
   cuaDriver: CuaDriverService
+  factory: FactoryManager
   heartbeats: HeartbeatService
   schedules: AutomationService
   browser: AgentBrowserService
@@ -377,6 +379,18 @@ export function registerIpc(services: Services, expectedRendererUrl: string): Ip
   on('terminal:set-active-context', (event, terminalId, context) => services.terminals.setActiveContext(event.sender, terminalId, context))
   on('terminal:clear-active-context', (event, terminalId) => services.terminals.clearActiveContext(event.sender, terminalId))
   handle('terminal:kill', (event, terminalId) => services.terminals.kill(event.sender, terminalId))
+
+  const authorizeEitherCwd = async (cwd: unknown): Promise<string> => {
+    const requested = requireString(cwd, 'projectPath', { min: 1, max: 4096 })
+    try { return await services.projects.authorizeCwd(requested) } catch (error) {
+      for (const fallback of [services.omp.projects, services.pi.projects]) {
+        try { return await fallback.authorizeCwd(requested) } catch { /* try the next harness; the Prime error is rethrown */ }
+      }
+      throw error
+    }
+  }
+  handle('factory:status', async (_event, projectPath) => services.factory.status(await authorizeEitherCwd(projectPath)))
+  handle('factory:ensure', async (_event, projectPath) => services.factory.ensure(await authorizeEitherCwd(projectPath)))
 
   handle('git:status', (_event, cwd) => services.git.status(cwd))
   handle('git:diff', (_event, cwd, path, staged) => services.git.diff(cwd, path, staged))
