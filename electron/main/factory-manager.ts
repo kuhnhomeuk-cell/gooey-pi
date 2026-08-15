@@ -30,6 +30,12 @@ interface FactoryEntry {
   url?: string
   state: FactoryState
   message?: string
+  generation: number
+}
+
+interface BootRecord {
+  generation: number
+  promise: Promise<void>
 }
 
 function delay(ms: number): Promise<void> {
@@ -151,7 +157,9 @@ function processFailed(result: ProcessResult, fallback: string): string | undefi
 
 export class FactoryManager {
   private readonly entries = new Map<string, FactoryEntry>()
-  private readonly locks = new Map<string, Promise<void>>()
+  private readonly boots = new Map<string, BootRecord>()
+  private readonly generations = new Map<string, number>()
+  private readonly healthAborts = new Map<string, Set<AbortController>>()
   private closed = false
   private readonly runProcessFn: typeof runProcess
   private readonly spawnFn: typeof spawn
@@ -188,12 +196,7 @@ export class FactoryManager {
     if (this.closed) return { state: 'error', message: 'Factory manager is shutting down' }
     const live = this.liveEntry(root)
     if (live) return this.toStatus(live)
-    if (!this.locks.has(root)) {
-      const lock = this.boot(root).finally(() => {
-        if (this.locks.get(root) === lock) this.locks.delete(root)
-      })
-      this.locks.set(root, lock)
-    }
+    this.beginBoot(root)
     const entry = this.entries.get(root)
     if (entry) return this.toStatus(entry)
     if (!(await this.detect(root))) return { state: 'none' }
@@ -202,18 +205,55 @@ export class FactoryManager {
 
   async stop(projectPath: string): Promise<void> {
     const root = await canonicalize(projectPath)
-    this.locks.delete(root)
+    const boot = this.invalidate(root)
     const entry = this.entries.get(root)
     this.entries.delete(root)
     if (entry?.child) await this.killChild(entry.child)
+    if (boot) await boot.promise
   }
 
   async stopAll(): Promise<void> {
     this.closed = true
+    const boots = [...this.boots.values()]
     const entries = [...this.entries.values()]
+    for (const root of [...this.generations.keys(), ...this.entries.keys(), ...this.boots.keys()]) this.bumpGeneration(root)
+    this.abortAllHealth()
     this.entries.clear()
-    this.locks.clear()
+    this.boots.clear()
     await Promise.all(entries.map((entry) => entry.child ? this.killChild(entry.child) : Promise.resolve()))
+    await Promise.all(boots.map((boot) => boot.promise))
+  }
+
+  private beginBoot(root: string): void {
+    const current = this.generations.get(root) ?? 0
+    const inFlight = this.boots.get(root)
+    if (inFlight && inFlight.generation === current) return
+    const generation = this.bumpGeneration(root)
+    if (this.entries.has(root)) {
+      this.entries.set(root, { port: 0, state: 'starting', generation })
+    }
+    const promise = this.boot(root, generation).finally(() => {
+      const record = this.boots.get(root)
+      if (record?.promise === promise) this.boots.delete(root)
+    })
+    this.boots.set(root, { generation, promise })
+  }
+
+  private invalidate(root: string): BootRecord | undefined {
+    const boot = this.boots.get(root)
+    this.bumpGeneration(root)
+    this.abortHealth(root)
+    return boot
+  }
+
+  private bumpGeneration(root: string): number {
+    const generation = (this.generations.get(root) ?? 0) + 1
+    this.generations.set(root, generation)
+    return generation
+  }
+
+  private owns(root: string, generation: number, entry?: FactoryEntry): boolean {
+    return !this.closed && this.generations.get(root) === generation && (entry === undefined || this.entries.get(root) === entry)
   }
 
   private liveEntry(root: string): FactoryEntry | undefined {
@@ -244,15 +284,55 @@ export class FactoryManager {
     return this.bunOverride ?? await resolveBunExecutable()
   }
 
-  private async waitForHealth(port: number, child: ChildProcess): Promise<void> {
+  private trackHealthAbort(root: string, controller: AbortController): void {
+    let set = this.healthAborts.get(root)
+    if (!set) {
+      set = new Set()
+      this.healthAborts.set(root, set)
+    }
+    set.add(controller)
+  }
+
+  private untrackHealthAbort(root: string, controller: AbortController): void {
+    const set = this.healthAborts.get(root)
+    if (!set) return
+    set.delete(controller)
+    if (set.size === 0) this.healthAborts.delete(root)
+  }
+
+  private abortHealth(root: string): void {
+    const set = this.healthAborts.get(root)
+    if (!set) return
+    for (const controller of set) controller.abort()
+    this.healthAborts.delete(root)
+  }
+
+  private abortAllHealth(): void {
+    for (const set of this.healthAborts.values()) for (const controller of set) controller.abort()
+    this.healthAborts.clear()
+  }
+
+  private async waitForHealth(port: number, child: ChildProcess, root: string, generation: number): Promise<void> {
     const deadline = this.now() + HEALTH_TIMEOUT_MS
     while (this.now() < deadline) {
-      if (this.closed) throw new Error('Factory manager is shutting down')
+      if (!this.owns(root, generation) || this.closed) throw new Error('Factory manager is shutting down')
       if (!isChildAlive(child)) throw new Error('Factory watch-screen exited unexpectedly')
+      const remaining = deadline - this.now()
+      if (remaining <= 0) break
+      const controller = new AbortController()
+      this.trackHealthAbort(root, controller)
+      const timer = setTimeout(() => controller.abort(), remaining)
+      timer.unref()
       try {
-        const response = await this.fetchFn(`http://127.0.0.1:${port}/api/health`)
+        const response = await this.fetchFn(`http://127.0.0.1:${port}/api/health`, { signal: controller.signal })
         if (response.status === 200) return
-      } catch { /* not ready yet */ }
+      } catch {
+        if (!this.owns(root, generation) || this.closed) throw new Error('Factory manager is shutting down')
+        if (this.now() >= deadline) break
+      } finally {
+        clearTimeout(timer)
+        this.untrackHealthAbort(root, controller)
+      }
       await this.delayFn(HEALTH_POLL_MS)
     }
     throw new Error('Factory watch-screen did not become ready')
@@ -271,34 +351,54 @@ export class FactoryManager {
     })
   }
 
-  private async boot(root: string): Promise<void> {
-    if (!(await this.detect(root))) return
-    const entry: FactoryEntry = { port: 0, state: 'starting' }
-    this.entries.set(root, entry)
+  private async boot(root: string, generation: number): Promise<void> {
+    if (!this.owns(root, generation)) return
+    if (!(await this.detect(root))) {
+      if (this.owns(root, generation)) {
+        const current = this.entries.get(root)
+        if (current?.generation === generation && current.state === 'starting') this.entries.delete(root)
+      }
+      return
+    }
+    if (!this.owns(root, generation)) return
+
+    let entry = this.entries.get(root)
+    if (!entry || entry.generation !== generation) {
+      entry = { port: 0, state: 'starting', generation }
+      this.entries.set(root, entry)
+    }
+
     try {
       const visualizer = join(root, '.claude', 'skills', 'sssf', 'apps', 'visualizer')
       if (!(await directoryExists(visualizer))) throw new Error('Factory visualizer is missing')
+      if (!this.owns(root, generation, entry)) return
 
       if (!(await directoryExists(join(visualizer, 'dist')))) {
+        if (!this.owns(root, generation, entry)) return
         entry.state = 'installing'
         const bun = await this.bun()
+        if (!this.owns(root, generation, entry)) return
         const install = await this.runProcessFn(bun, ['install'], { cwd: visualizer, timeoutMs: INSTALL_TIMEOUT_MS })
+        if (!this.owns(root, generation, entry)) return
         const installError = processFailed(install, 'bun install')
         if (installError) throw new Error(installError)
         const build = await this.runProcessFn(bun, ['run', 'build'], { cwd: visualizer, timeoutMs: BUILD_TIMEOUT_MS })
+        if (!this.owns(root, generation, entry)) return
         const buildError = processFailed(build, 'bun run build')
         if (buildError) throw new Error(buildError)
       }
 
-      if (this.closed || this.entries.get(root) !== entry) return
+      if (!this.owns(root, generation, entry)) return
       entry.state = 'starting'
       const db = await this.resolveDb(root)
+      if (!this.owns(root, generation, entry)) return
       const port = await this.allocatePortFn()
+      if (!this.owns(root, generation, entry)) return
       entry.port = port
       entry.url = `http://127.0.0.1:${port}`
 
       const bun = await this.bun()
-      if (this.closed || this.entries.get(root) !== entry) return
+      if (!this.owns(root, generation, entry)) return
 
       const options: SpawnOptions = {
         cwd: visualizer,
@@ -312,24 +412,24 @@ export class FactoryManager {
       entry.child = child
       registerChildProcess(child)
       child.once('close', () => {
-        if (this.entries.get(root) !== entry) return
+        if (!this.owns(root, generation, entry)) return
         if (entry.state === 'running' || entry.state === 'starting' || entry.state === 'installing') {
           entry.state = 'error'
           entry.message = 'Factory watch-screen exited unexpectedly'
         }
       })
       child.once('error', (error) => {
-        if (this.entries.get(root) !== entry) return
+        if (!this.owns(root, generation, entry)) return
         entry.state = 'error'
         entry.message = error instanceof Error ? error.message : String(error)
       })
 
-      await this.waitForHealth(port, child)
-      if (this.closed || this.entries.get(root) !== entry) return
+      await this.waitForHealth(port, child, root, generation)
+      if (!this.owns(root, generation, entry)) return
       if (!isChildAlive(child)) throw new Error('Factory watch-screen exited unexpectedly')
       entry.state = 'running'
     } catch (error) {
-      if (this.entries.get(root) !== entry) return
+      if (!this.owns(root, generation, entry)) return
       entry.state = 'error'
       entry.message = error instanceof Error ? error.message : String(error)
       if (entry.child) await this.killChild(entry.child)

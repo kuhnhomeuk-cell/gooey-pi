@@ -380,8 +380,17 @@ export function registerIpc(services: Services, expectedRendererUrl: string): Ip
   on('terminal:clear-active-context', (event, terminalId) => services.terminals.clearActiveContext(event.sender, terminalId))
   handle('terminal:kill', (event, terminalId) => services.terminals.kill(event.sender, terminalId))
 
-  handle('factory:status', (_event, projectPath) => services.factory.status(requireString(projectPath, 'projectPath', { min: 1, max: 4096 })))
-  handle('factory:ensure', (_event, projectPath) => services.factory.ensure(requireString(projectPath, 'projectPath', { min: 1, max: 4096 })))
+  const authorizeEitherCwd = async (cwd: unknown): Promise<string> => {
+    const requested = requireString(cwd, 'projectPath', { min: 1, max: 4096 })
+    try { return await services.projects.authorizeCwd(requested) } catch (error) {
+      for (const fallback of [services.omp.projects, services.pi.projects]) {
+        try { return await fallback.authorizeCwd(requested) } catch { /* try the next harness; the Prime error is rethrown */ }
+      }
+      throw error
+    }
+  }
+  handle('factory:status', async (_event, projectPath) => services.factory.status(await authorizeEitherCwd(projectPath)))
+  handle('factory:ensure', async (_event, projectPath) => services.factory.ensure(await authorizeEitherCwd(projectPath)))
 
   handle('git:status', (_event, cwd) => services.git.status(cwd))
   handle('git:diff', (_event, cwd, path, staged) => services.git.diff(cwd, path, staged))

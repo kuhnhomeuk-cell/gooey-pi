@@ -1,8 +1,9 @@
-import { createElement, useCallback, useEffect, useState, type CSSProperties } from 'react'
+import { createElement, useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
 import { errorMessage } from '@/lib/errors'
 import { BROWSER_PARTITION, type FactoryStatus } from '@/types/api'
 
 const NO_FACTORY = 'This project has no factory yet. Double-click the Install Factory app on the Desktop, drop this project\'s folder on it, then come back.'
+const LOAD_FAILED = 'The factory watch-screen failed to load.'
 
 const overlayStyle: CSSProperties = {
   position: 'absolute',
@@ -20,6 +21,8 @@ export function FactoryPanel({ cwd }: { cwd?: string }) {
   const [status, setStatus] = useState<FactoryStatus>({ state: 'none' })
   const [url, setUrl] = useState<string | undefined>()
   const [nonce, setNonce] = useState(0)
+  const webviewRef = useRef<HTMLElement | null>(null)
+  const guestFailedRef = useRef(false)
 
   useEffect(() => {
     if (!cwd || !window.prime) {
@@ -29,23 +32,27 @@ export function FactoryPanel({ cwd }: { cwd?: string }) {
     }
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | undefined
+    guestFailedRef.current = false
     setUrl(undefined)
     setStatus({ state: 'starting' })
 
     const apply = (next: FactoryStatus) => {
-      if (cancelled) return
+      if (cancelled || guestFailedRef.current) return
       setStatus(next)
       if (next.state === 'running' && next.url) setUrl(next.url)
+      else setUrl(undefined)
+    }
+
+    const shouldPoll = (next: FactoryStatus): boolean => {
+      return !cancelled && !guestFailedRef.current && next.state !== 'error' && next.state !== 'none'
     }
 
     const poll = async () => {
-      if (cancelled || !window.prime) return
+      if (cancelled || guestFailedRef.current || !window.prime) return
       try {
         const next = await window.prime.factory.status(cwd)
         apply(next)
-        if (!cancelled && next.state !== 'running' && next.state !== 'error' && next.state !== 'none') {
-          timer = setTimeout(() => { void poll() }, 1_500)
-        }
+        if (shouldPoll(next)) timer = setTimeout(() => { void poll() }, 1_500)
       } catch (error) {
         apply({ state: 'error', message: errorMessage(error) })
       }
@@ -53,9 +60,7 @@ export function FactoryPanel({ cwd }: { cwd?: string }) {
 
     void window.prime.factory.ensure(cwd).then((next) => {
       apply(next)
-      if (!cancelled && next.state !== 'running' && next.state !== 'error' && next.state !== 'none') {
-        timer = setTimeout(() => { void poll() }, 1_500)
-      }
+      if (shouldPoll(next)) timer = setTimeout(() => { void poll() }, 1_500)
     }).catch((error: unknown) => {
       apply({ state: 'error', message: errorMessage(error) })
     })
@@ -65,6 +70,23 @@ export function FactoryPanel({ cwd }: { cwd?: string }) {
       if (timer) clearTimeout(timer)
     }
   }, [cwd, nonce])
+
+  useEffect(() => {
+    const view = webviewRef.current
+    if (!view || !url) return
+    const fail = () => {
+      guestFailedRef.current = true
+      setUrl(undefined)
+      setStatus({ state: 'error', message: LOAD_FAILED })
+      if (cwd && window.prime) void window.prime.factory.ensure(cwd)
+    }
+    view.addEventListener('did-fail-load', fail)
+    view.addEventListener('did-fail-provisional-load', fail)
+    return () => {
+      view.removeEventListener('did-fail-load', fail)
+      view.removeEventListener('did-fail-provisional-load', fail)
+    }
+  }, [cwd, url])
 
   const retry = useCallback(() => { setNonce((value) => value + 1) }, [])
 
@@ -83,6 +105,7 @@ export function FactoryPanel({ cwd }: { cwd?: string }) {
         partition: BROWSER_PARTITION,
         webpreferences: 'contextIsolation=yes,sandbox=yes,nodeIntegration=no',
         style: { flex: 1, width: '100%', height: '100%' },
+        ref: (node: HTMLElement | null) => { webviewRef.current = node },
       }) : null}
       {overlay}
     </div>
