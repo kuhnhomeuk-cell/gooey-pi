@@ -1,10 +1,11 @@
 import { EventEmitter } from 'node:events'
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { createServer, type Server } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { ChildProcess } from 'node:child_process'
-import { FactoryManager, parseObservabilityDb } from '../../electron/main/factory-manager'
+import { allocateEphemeralPort, FactoryManager, parseObservabilityDb } from '../../electron/main/factory-manager'
 import type { ProcessResult } from '../../electron/main/process-utils'
 import type { FactoryStatus } from '../../src/types/api'
 import { waitUntil } from '../helpers/wait'
@@ -333,24 +334,36 @@ describe('FactoryManager', () => {
     const root = factoryProject()
     const ports: number[] = []
     const children: ChildProcess[] = []
+    const firstKillSignals: NodeJS.Signals[] = []
     const firstHealthSignals: AbortSignal[] = []
-    let nextPort = 4619
+    let holder: Server | undefined
+    let holderListening: Promise<void> = Promise.resolve()
     const manager = new FactoryManager({
       bun: '/usr/local/bin/bun',
       allocatePort: async () => {
-        if (ports.length >= 1) {
-          const previous = children[0]
-          expect(previous, 'first child must exit and release its port before the next bind').toBeDefined()
-          expect(previous?.exitCode !== null || previous?.signalCode !== null).toBe(true)
+        if (ports.length === 0) {
+          const port = await allocateEphemeralPort()
+          ports.push(port)
+          return port
         }
-        const port = nextPort++
-        ports.push(port)
-        return port
+        const released = ports[0]
+        expect(released).toBeTypeOf('number')
+        await new Promise<void>((resolve, reject) => {
+          const probe = createServer()
+          probe.once('error', reject)
+          probe.listen(released, '127.0.0.1', () => {
+            probe.close((error) => { if (error) reject(error); else resolve() })
+          })
+        })
+        ports.push(released!)
+        return released!
       },
       delay: async () => undefined,
       fetch: ((url, init) => {
-        const port = new URL(String(url)).port
-        if (port === '4619') {
+        const port = Number(new URL(String(url)).port)
+        const first = children[0]
+        const firstStillAlive = first != null && first.exitCode === null && first.signalCode === null
+        if (firstStillAlive && port === ports[0]) {
           const signal = init?.signal
           if (!signal) return Promise.reject(new Error('health fetch is missing an AbortSignal'))
           firstHealthSignals.push(signal)
@@ -362,15 +375,46 @@ describe('FactoryManager', () => {
         }
         return Promise.resolve(new Response('ok', { status: 200 }))
       }) as typeof fetch,
-      spawn: (() => {
-        const child = fakeChild()
+      spawn: ((_file: string, _args: readonly string[], options: { env?: NodeJS.ProcessEnv }) => {
+        const child = new EventEmitter() as ChildProcess & { pid: number; exitCode: number | null; signalCode: NodeJS.Signals | null }
+        Object.assign(child, { pid: 4_242 + children.length, exitCode: null, signalCode: null })
         children.push(child)
         if (children.length === 1) {
+          const port = Number(options.env?.PORT)
+          const server = createServer()
+          holder = server
+          holderListening = new Promise<void>((resolve, reject) => {
+            server.once('error', reject)
+            server.listen(port, '127.0.0.1', resolve)
+          })
+          child.kill = ((signal?: NodeJS.Signals) => {
+            const delivered = signal ?? 'SIGTERM'
+            firstKillSignals.push(delivered)
+            const finish = (): void => {
+              if (child.exitCode !== null || child.signalCode !== null) return
+              Object.assign(child, { exitCode: 0, signalCode: delivered })
+              child.emit('exit', 0, delivered)
+              child.emit('close', 0, delivered)
+            }
+            if (!holder) {
+              finish()
+              return true
+            }
+            holder.close(() => {
+              holder = undefined
+              finish()
+            })
+            return true
+          }) as ChildProcess['kill']
           queueMicrotask(() => {
             child.emit('error', Object.assign(new Error('spawn EACCES'), { code: 'EACCES' }))
-            Object.assign(child, { exitCode: 1 })
-            child.emit('close', 1, null)
           })
+        } else {
+          child.kill = ((signal?: NodeJS.Signals) => {
+            Object.assign(child, { exitCode: signal === 'SIGKILL' ? 1 : 0 })
+            child.emit('close', child.exitCode, signal ?? null)
+            return true
+          }) as ChildProcess['kill']
         }
         return child
       }) as typeof import('node:child_process').spawn,
@@ -378,20 +422,25 @@ describe('FactoryManager', () => {
 
     const first = manager.ensure(root)
     await waitUntil(() => children.length === 1)
+    await holderListening
     await waitForStatus(manager, root, (status) => status.state === 'error')
     await expect(manager.status(root)).resolves.toEqual({ state: 'error', message: 'spawn EACCES' })
     expect(ports).toHaveLength(1)
+    expect(children[0]?.exitCode).toBeNull()
+    expect(children[0]?.signalCode).toBeNull()
+    expect(firstKillSignals).toEqual([])
 
     const retry = await manager.ensure(root)
     expect(retry).toEqual({ state: 'starting' })
+    expect(firstKillSignals).toEqual(['SIGTERM'])
+    expect(children[0]?.exitCode !== null || children[0]?.signalCode !== null).toBe(true)
     await waitUntil(() => children.length === 2 && ports.length === 2)
-    expect(children[0]?.exitCode).not.toBeNull()
     expect(firstHealthSignals.some((signal) => signal.aborted)).toBe(true)
     await first
     await waitForStatus(manager, root, (status) => status.state === 'running')
     await expect(manager.status(root)).resolves.toEqual({ state: 'running', url: `http://127.0.0.1:${ports[1]}` })
     expect(children).toHaveLength(2)
-    expect(ports).toEqual([4619, 4620])
+    expect(ports[0]).toBe(ports[1])
     await manager.stopAll()
   })
 
