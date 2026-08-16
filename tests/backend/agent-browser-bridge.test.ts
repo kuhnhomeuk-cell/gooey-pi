@@ -2,6 +2,7 @@ import { request as httpRequest } from 'node:http'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentBrowserBridge } from '../../electron/main/browser/agent-bridge'
 import type { AgentBrowserService } from '../../electron/main/browser/agent-service'
+import { REQUEST_DEADLINE_MS } from '../../electron/main/lib/capability-bridge'
 import { waitUntil } from '../helpers/wait'
 
 class TestAgentBrowserBridge extends AgentBrowserBridge {
@@ -97,6 +98,28 @@ describe('AgentBrowserBridge', () => {
 
     await expect(response).resolves.toMatchObject({ status: 401, body: expect.stringContaining('Capability expired') })
     expect(calls).toHaveLength(0)
+  })
+
+  it('does not delay stop when a client never finishes the request body', async () => {
+    const { bridge, environment } = await fixture()
+    const token = environment.PRIME_WORK_BROWSER_TOKEN!
+    const body = JSON.stringify({ method: 'tabs.list', params: {} })
+    const request = httpRequest(environment.PRIME_WORK_BROWSER_URL!, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+      },
+    })
+    request.on('error', () => undefined)
+    request.write(body.slice(0, -1))
+    await waitUntil(() => bridge.requestsFor(token) === 1)
+
+    await expect(Promise.race([
+      bridge.stop(),
+      new Promise((_resolve, reject) => setTimeout(() => reject(new Error('stop() waited for the hanging request')), REQUEST_DEADLINE_MS)),
+    ])).resolves.toBeUndefined()
   })
 
   it('exposes the extension and skill paths and dispatches scoped methods', async () => {

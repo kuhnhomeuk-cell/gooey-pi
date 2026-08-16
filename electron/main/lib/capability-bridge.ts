@@ -1,12 +1,14 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
-import type { AddressInfo } from 'node:net'
+import type { AddressInfo, Socket } from 'node:net'
 import type { HarnessId } from '../../../src/types/api'
 import { requireRecord, requireString } from '../validation'
 
 const MAX_BODY_BYTES = 1_100_000
 const TOKEN_TTL_MS = 24 * 60 * 60_000
 const RATE_WINDOW_MS = 60_000
+/** Bound on receiving one request's headers and body. Loopback JSON is small; 5s is plenty. */
+export const REQUEST_DEADLINE_MS = 5_000
 
 export interface CapabilityClaim {
   token: string
@@ -47,6 +49,7 @@ export abstract class CapabilityBridge {
   private server: Server | null = null
   private port = 0
   private readonly claims = new Map<string, CapabilityClaim>()
+  private readonly sockets = new Set<Socket>()
 
   /** Requests allowed per claim per minute. */
   protected abstract readonly rateLimit: number
@@ -59,7 +62,13 @@ export abstract class CapabilityBridge {
   async start(): Promise<void> {
     if (this.server) return
     this.server = createServer((request, response) => { void this.handle(request, response) })
+    this.server.headersTimeout = REQUEST_DEADLINE_MS
+    this.server.requestTimeout = REQUEST_DEADLINE_MS
     this.server.on('clientError', (_error, socket) => socket.destroy())
+    this.server.on('connection', (socket) => {
+      this.sockets.add(socket)
+      socket.once('close', () => this.sockets.delete(socket))
+    })
     await new Promise<void>((resolveStart, reject) => {
       const server = this.server!
       const onError = (error: Error) => { server.off('listening', onListening); reject(error) }
@@ -102,6 +111,8 @@ export abstract class CapabilityBridge {
     this.server = null
     this.port = 0
     if (!server) return
+    for (const socket of [...this.sockets]) socket.destroy()
+    this.sockets.clear()
     await new Promise<void>((resolveStop) => server.close(() => resolveStop()))
   }
 
@@ -141,13 +152,28 @@ export abstract class CapabilityBridge {
     return new Promise((resolveBody, reject) => {
       const chunks: Buffer[] = []
       let bytes = 0
+      let settled = false
+      const finish = (action: () => void): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        action()
+      }
+      const timer = setTimeout(() => {
+        finish(() => reject(new TypeError('Request timed out')))
+        request.destroy()
+      }, REQUEST_DEADLINE_MS)
+      timer.unref()
       request.on('data', (chunk: Buffer) => {
         bytes += chunk.length
-        if (bytes > MAX_BODY_BYTES) { reject(new TypeError('Request body is too large')); request.destroy(); return }
+        if (bytes > MAX_BODY_BYTES) { finish(() => reject(new TypeError('Request body is too large'))); request.destroy(); return }
         chunks.push(chunk)
       })
-      request.once('end', () => resolveBody(Buffer.concat(chunks).toString('utf8')))
-      request.once('error', reject)
+      request.once('end', () => finish(() => resolveBody(Buffer.concat(chunks).toString('utf8'))))
+      request.once('error', (error) => finish(() => reject(error)))
+      request.once('close', () => {
+        if (!request.complete) finish(() => reject(new TypeError('Request closed')))
+      })
     })
   }
 
