@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { memo, useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   Check,
   ChevronDown,
@@ -86,7 +86,7 @@ export function ThinkingDots({ labelled = false }: { labelled?: boolean }) {
   )
 }
 
-function ToolPart({ part, next }: { part: Extract<MessagePart, { type: 'toolCall' }>; next?: MessagePart }) {
+const ToolPart = memo(function ToolPart({ part, next }: { part: Extract<MessagePart, { type: 'toolCall' }>; next?: MessagePart }) {
   const [open, setOpen] = useState(false)
   const [copied, setCopied] = useState(false)
   const resetCopiedTimerRef = useRef<number | null>(null)
@@ -138,7 +138,7 @@ function ToolPart({ part, next }: { part: Extract<MessagePart, { type: 'toolCall
       ) : null}
     </div>
   )
-}
+})
 
 function StandaloneToolResult({ part }: { part: Extract<MessagePart, { type: 'toolResult' }> }) {
   return <div className={`activity-line activity-line--result ${part.isError ? 'is-error' : ''}`}><span className="activity-line__icon">{part.isError ? <CircleAlert size={13} /> : <Check size={13} />}</span><span>{boundText(part.text, 2_000, '…')}</span></div>
@@ -205,7 +205,7 @@ function partKey(part: MessagePart, index: number): string {
   return part.partId ?? `${part.type}:${index}`
 }
 
-export function WorkTimeline({ parts, showReasoning, showTools, streaming = false }: { parts: MessagePart[]; showReasoning: boolean; showTools: boolean; streaming?: boolean }) {
+export const WorkTimeline = memo(function WorkTimeline({ parts, showReasoning, showTools, streaming = false }: { parts: MessagePart[]; showReasoning: boolean; showTools: boolean; streaming?: boolean }) {
   const pairedResults = new Set<number>()
   return <div className="work-timeline">{parts.map((part, index) => {
     const key = partKey(part, index)
@@ -223,7 +223,7 @@ export function WorkTimeline({ parts, showReasoning, showTools, streaming = fals
     if (part.type === 'text') return <div className="activity-line activity-line--note" key={key}><MarkdownText text={part.text} streaming={streaming} /></div>
     return null
   })}</div>
-}
+})
 
 export function WorkDisclosure({ message, parts, showReasoning, showTools, running = message.streaming }: { message: TranscriptMessage; parts: MessagePart[]; showReasoning: boolean; showTools: boolean; running?: boolean }) {
   const [open, setOpen] = useState(false)
