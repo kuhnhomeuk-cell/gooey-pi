@@ -407,13 +407,18 @@ export function ScheduledPage({
     if (saving) return
     const validationError = validate()
     if (validationError || !currentTiming) { setFormError(validationError); return }
+    const target = editor?.mode === 'edit' ? editingSchedule : undefined
+    if (editor?.mode === 'edit' && !target) {
+      setFormError('This schedule is no longer available to edit.')
+      return
+    }
     setSaving(true); setFormError('')
     const values = {
       title: form.title.trim(), prompt: form.prompt.trim(), target: targetFromForm(form),
       timing: currentTiming, execution: executionFromForm(form),
     }
     try {
-      if (editor?.mode === 'edit' && editingSchedule) await onUpdate(editingSchedule.id, { revision: editingSchedule.revision, ...values })
+      if (target) await onUpdate(target.id, { revision: target.revision, ...values })
       else await onCreate(values)
       setEditor(null)
     } catch (reason) { setFormError(errorMessage(reason)) }
