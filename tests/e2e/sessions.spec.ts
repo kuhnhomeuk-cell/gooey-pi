@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, readFileSync, realpathSync } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { attachHermeticHooks, currentFixture, expect, fixtureRoot, fixtureSessionFile, page, test } from './fixtures/desktop'
 
@@ -62,6 +62,21 @@ test.describe('Prime Work sessions', () => {
     expect(offset.size).toBeCloseTo(26.4, 1)
     expect(Math.abs(offset.x)).toBeLessThanOrEqual(0.5)
     expect(Math.abs(offset.y)).toBeLessThanOrEqual(0.5)
+  })
+
+  test('picks, previews, and removes an image in the composer', async () => {
+    await page.locator('.session-row-wrap').filter({ hasText: 'Hermetic desktop fixture' }).locator('.session-row').click()
+    const imagePath = join(fixtureRoot, 'picker.png')
+    writeFileSync(imagePath, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'))
+
+    await page.getByRole('button', { name: 'Add context' }).click()
+    const fileChooser = page.waitForEvent('filechooser')
+    await page.getByRole('option', { name: /Add files/ }).click()
+    await (await fileChooser).setFiles(imagePath)
+    await expect(page.locator('.composer-attachment').filter({ hasText: 'picker.png' })).toBeVisible()
+    await expect(page.locator('.composer p[role="status"]')).toHaveText('1 file attached.')
+    await page.getByRole('button', { name: 'Remove picker.png' }).click()
+    await expect(page.locator('.composer-attachment').filter({ hasText: 'picker.png' })).toHaveCount(0)
   })
 
   test('collapses composer selectors and keeps the checkout menu inside a narrow conversation pane', async () => {
@@ -537,7 +552,7 @@ test.describe('Prime Work sessions', () => {
     await page.getByRole('button', { name: /^New session/ }).first().click()
     const composer = page.getByRole('combobox', { name: 'Message Prime' })
     await composer.fill('/mcp')
-    await expect(page.locator('.composer-menu').getByRole('option', { name: /\/mcp Manage and sign in/ })).toBeVisible()
+    await expect(page.locator('.composer-menu').getByRole('option', { name: /\/mcp View MCP integrations/ })).toBeVisible()
     await page.getByRole('button', { name: 'Send message' }).click()
 
     await expect(page.getByRole('heading', { name: /Extend/ })).toBeVisible()
@@ -553,6 +568,10 @@ test.describe('Prime Work sessions', () => {
 
     const dialog = page.getByRole('dialog', { name: 'Answer 2 questions' })
     await expect(dialog).toBeVisible()
+    await expect(page.locator('.work-disclosure__rail')).toBeVisible()
+    const workStatus = page.locator('.work-disclosure__status')
+    await expect(workStatus).toHaveAttribute('role', 'status')
+    await expect(workStatus).toContainText('Working')
     await expect(page.locator('.activity-line--reasoning')).toContainText('Reviewing the available release channels')
     await expect(page.locator('.thinking-dots > span')).toHaveCount(3)
     await expect(page.locator('.work-disclosure__button')).toHaveCount(0)

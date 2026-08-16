@@ -137,7 +137,7 @@ export type MessagePart =
   | { type: 'text'; partId?: string; text: string }
   | { type: 'thinking'; partId?: string; text: string }
   | { type: 'toolCall'; partId?: string; id?: string; name: string; args?: unknown }
-  | { type: 'toolResult'; partId?: string; name?: string; text: string; isError?: boolean }
+  | { type: 'toolResult'; partId?: string; name?: string; text: string; isError?: boolean; streaming?: boolean }
   | { type: 'agentMessage'; partId?: string; text: string; agentName?: string }
   | { type: 'image'; partId?: string; mimeType?: string; data?: string; dataTruncated?: boolean }
   | {
@@ -268,6 +268,10 @@ export interface SkillRecord {
   /** MCP server ids this package exists to bridge. Used to collapse duplicate capability rows. */
   associatedMcpServers?: string[]
   associatedPackageSource?: string
+  /** Exact bounded map key used only for definition removal; never rendered as display copy. */
+  definitionKey?: string
+  /** False when an external definition key cannot be represented safely by the app removal API. */
+  definitionRemovalAvailable?: boolean
   availability?: {
     available: boolean
     detail: string
@@ -306,6 +310,8 @@ export interface CapabilityMutationInput {
   kind: 'package' | 'mcp'
   action: 'enable' | 'disable' | 'remove'
   name: string
+  /** Exact bounded MCP map key for definition-only removal. */
+  definitionKey?: string
   source?: string
   scope: 'user' | 'project'
   projectPath?: string
@@ -400,9 +406,12 @@ export interface SessionActionSnapshot {
 
 export const INTERFACE_FONT_SCALES = [105, 110, 115] as const
 export type InterfaceFontScale = typeof INTERFACE_FONT_SCALES[number]
+export const LOCALE_PREFERENCES = ['system', 'en', 'zh-CN'] as const
+export type LocalePreference = typeof LOCALE_PREFERENCES[number]
 
 export interface AppSettings {
   theme: ThemeMode
+  locale: LocalePreference
   /** Bounded interface text scale; 110 is the designed default. */
   interfaceFontScale: InterfaceFontScale
   sidebarOpen: boolean
@@ -706,8 +715,6 @@ export interface PrimeWorkApi {
     setDisabled(providerIds: string[], harness?: HarnessId): Promise<PrimeModelCatalog>
     setModelEnabled(modelKey: string, enabled: boolean, harness?: HarnessId): Promise<PrimeModelCatalog>
     startOAuth(providerId: string): Promise<{ flowId: string }>
-    startMcpOAuth(server: string, harness?: HarnessId): Promise<{ flowId: string }>
-    logoutMcp(server: string, harness?: HarnessId): Promise<void>
     respondOAuth(flowId: string, promptId: string, value?: string): Promise<boolean>
     cancelOAuth(flowId: string): Promise<boolean>
     onAuthEvent(callback: (event: ProviderAuthEvent) => void): () => void

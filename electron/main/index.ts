@@ -4,6 +4,7 @@ import { extname, isAbsolute, join, relative, resolve, win32 as win32Path } from
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { pathToFileURL } from 'node:url'
+import { assertNoMcpAuthenticationCommand } from '../../src/lib/mcp-policy'
 import { BROWSER_PARTITION, type ApplicationMenuName, type AppMeta, type AppUpdateState, type HarnessId, type PrimeEventEnvelope, type ProviderAuthEvent, type RuntimeInfo, type ThemeMode } from '../../src/types/api'
 import { AgentRpcManager, OMP_RPC_ADAPTER, PI_RPC_ADAPTER } from './agent-rpc'
 import { installApplicationMenu } from './application-menu'
@@ -575,7 +576,6 @@ async function bootstrap(): Promise<void> {
   const listCatalogSessions = (): ReturnType<SessionService['list']> => sessions.list(undefined, true)
 
   const providers = new PrimeProviderService({
-    agentDir: join(homedir(), '.prime', 'agent'),
     openExternal: async (url) => { await shell.openExternal(url, { activate: true }) },
   })
   providerService = providers
@@ -734,8 +734,6 @@ async function bootstrap(): Promise<void> {
     }
   }
   const plugins = new PluginService(primeExecutable, (path) => projects.authorizeProjectRoot(path), {
-    removeMcpCredential: (server) => providers.removeMcpCredential(server),
-    protectedMcpServers: providers.protectedMcpServers(),
     builtInSkills: async () => [{
       id: 'prime-work-schedules', name: 'Scheduled tasks',
       description: 'Create and manage durable project and thread schedules from an agent.',
@@ -813,6 +811,7 @@ async function bootstrap(): Promise<void> {
   const schedules = new AutomationService(stateStore, {
     validateTarget: (target, harness) => scheduledRuns[harness].validateTarget(target),
     validateExecution: (execution, harness) => scheduledRuns[harness].validateExecution(execution),
+    validatePrompt: assertNoMcpAuthenticationCommand,
     run: (task) => scheduledRuns[task.harness].run(task),
   })
   automation = schedules
