@@ -70,6 +70,22 @@ const DEFAULT_RPC_CHUNK_ASSEMBLY_TIMING: RpcChunkAssemblyTiming = {
   cancel: (timer) => clearTimeout(timer as NodeJS.Timeout),
 }
 
+/** Test seam: production uses child_process.spawn. */
+export type RpcRuntimeSpawn = (
+  command: string,
+  args: readonly string[],
+  options: {
+    cwd: string
+    env: NodeJS.ProcessEnv
+    shell: false
+    stdio: ['pipe', 'pipe', 'pipe']
+    windowsHide: true
+    detached: boolean
+  },
+) => ChildProcessWithoutNullStreams
+
+const defaultRpcSpawn: RpcRuntimeSpawn = (command, args, options) => spawn(command, args, options)
+
 export class RpcRuntime {
   readonly runtimeId = randomUUID()
   private readonly pending = new Map<string, PendingRequest>()
@@ -127,6 +143,7 @@ export class RpcRuntime {
     watchdogTimings: Partial<CompactionWatchdogTimings> = {},
     private readonly adapter: HarnessRpcAdapter = PRIME_RPC_ADAPTER,
     private readonly chunkAssemblyTiming: RpcChunkAssemblyTiming = DEFAULT_RPC_CHUNK_ASSEMBLY_TIMING,
+    spawnChild: RpcRuntimeSpawn = defaultRpcSpawn,
   ) {
     this.watchdogTimings = { ...DEFAULT_COMPACTION_WATCHDOG_TIMINGS, ...watchdogTimings }
     this.info = { runtimeId: this.runtimeId, harness: this.adapter.id, cwd, isStreaming: false, isCompacting: false, sessionActions: emptySessionActionSnapshot() }
@@ -135,7 +152,7 @@ export class RpcRuntime {
     // directory. Adapters that declare spawnsInCwd (pi has no --cwd flag and
     // buckets its sessions by the process working directory) depend on this.
     const invocation = prepareExecutableSpawn(executable, args, safeChildEnvironment(extraEnvironment))
-    this.child = spawn(invocation.file, invocation.args, { cwd, env: invocation.env, shell: false, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32' })
+    this.child = spawnChild(invocation.file, invocation.args, { cwd, env: invocation.env, shell: false, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32' })
     this.transport = new FramedRpcTransport(
       this.child,
       (line) => this.handleLine(line),
