@@ -3,8 +3,9 @@ import { resolve } from 'node:path'
 import type { HarnessId, PrimeModelDescriptor, RuntimeInfo, SessionRecord, TranscriptMessage } from '../../../src/types/api'
 import type { AgentRpcManager } from '../agent-rpc'
 import { CapabilityBridge, type CapabilityClaim } from '../lib/capability-bridge'
+import { startAgentTask } from '../lib/start-agent-task'
 import type { ModelCatalogProvider } from '../model-catalog'
-import { availableModels, rankedModelMatches, resolveModel, resolveReasoning } from '../model-selection'
+import { availableModels, rankedModelMatches } from '../model-selection'
 import { requireBoolean, requireId, requireInteger, requireString } from '../validation'
 import { encodeGooeyPiAgentMessage } from './message-envelope'
 
@@ -266,44 +267,25 @@ export class AgentCollaborationBridge extends CapabilityBridge {
     const modelQuery = params.model === undefined ? undefined : requireString(params.model, 'model', { min: 1, max: 512, trim: true })
     const reasoningQuery = params.reasoning === undefined ? undefined : requireString(params.reasoning, 'reasoning', { min: 1, max: 64, trim: true })
     const fast = params.fast === undefined ? undefined : requireBoolean(params.fast, 'fast')
-    const selectedModel = modelQuery ? resolveModel(modelQuery, await this.modelsFor(source)) : undefined
-    const selectedReasoning = selectedModel && reasoningQuery
-      ? resolveReasoning(reasoningQuery, selectedModel.availableThinkingLevels)
-      : undefined
-    const manager = source.manager
-    const runtime = await manager.start({
+    const { runtime: current, selectedModel, appliedReasoning } = await startAgentTask({
+      manager: source.manager,
       cwd: source.session.projectPath,
-      ...(selectedModel ? { model: selectedModel.key } : {}),
-      ...(selectedReasoning ? { thinking: selectedReasoning } : {}),
-      ...(fast !== undefined ? { fast } : {}),
+      prompt,
+      title,
+      modelQuery,
+      reasoningQuery,
+      availableModels: () => this.modelsFor(source),
+      fast,
+      missingSessionError: 'The harness accepted the prompt but did not create a visible session. The session was not reported as created.',
+      onCleanup: (runtimeId) => { this.pendingRuntimeTokens.delete(runtimeId) },
     })
-    let appliedReasoning = selectedReasoning
-    try {
-      if (!selectedModel && reasoningQuery) {
-        appliedReasoning = resolveReasoning(reasoningQuery, runtime.availableThinkingLevels ?? [])
-        await manager.command(runtime.runtimeId, { type: 'set_thinking_level', level: appliedReasoning })
-      }
-      await manager.command(runtime.runtimeId, { type: 'prompt', message: prompt })
-      if (title) await manager.command(runtime.runtimeId, { type: 'set_session_name', name: title }).catch(() => undefined)
-      await manager.command(runtime.runtimeId, { type: 'get_state' })
-    } catch (error) {
-      this.pendingRuntimeTokens.delete(runtime.runtimeId)
-      await manager.stop(runtime.runtimeId).catch(() => false)
-      throw error
-    }
-    const current = manager.list().find((candidate) => candidate.runtimeId === runtime.runtimeId) ?? runtime
-    if (!current.sessionFile) {
-      this.pendingRuntimeTokens.delete(runtime.runtimeId)
-      await manager.stop(runtime.runtimeId).catch(() => false)
-      throw new Error('The harness accepted the prompt but did not create a visible session. The session was not reported as created.')
-    }
     this.bindRuntimeSession(current.runtimeId, current.sessionFile)
     const sessionPath = resolve(current.sessionFile)
     const created = (await source.service.list(source.session.projectPath, false, true))
       .find((candidate) => candidate.depth === 0 && resolve(candidate.filePath) === sessionPath)
     if (!created) {
-      this.pendingRuntimeTokens.delete(runtime.runtimeId)
-      await manager.stop(runtime.runtimeId).catch(() => false)
+      this.pendingRuntimeTokens.delete(current.runtimeId)
+      await source.manager.stop(current.runtimeId).catch(() => false)
       throw new Error('The harness created a runtime but its session is not yet readable from GooeyPi')
     }
     return {

@@ -16,8 +16,9 @@ import type {
 } from '../../src/types/api'
 import type { AgentRpcManager } from './agent-rpc'
 import { HARNESSES } from './harness'
+import { startAgentTask } from './lib/start-agent-task'
 import type { ModelCatalogProvider } from './model-catalog'
-import { availableModels, rankedModelMatches, resolveModel, resolveReasoning } from './model-selection'
+import { availableModels, rankedModelMatches } from './model-selection'
 import type { ProcessResult } from './process-utils'
 import type { ProjectService } from './projects'
 import { isRecord, requireExistingPath, requireId, requireRecord, requireSelfHostedVoiceUrl, requireString } from './validation'
@@ -523,34 +524,16 @@ export class VoiceService {
     const project: ProjectRecord | undefined = (await this.options.projects[harness].list())
       .find((candidate) => candidate.id === projectId && !candidate.inferred)
     if (!project) throw new Error(`The requested project is not explicitly granted to the selected ${HARNESSES[harness].agentName} harness`)
-    const selectedModel = modelQuery ? resolveModel(modelQuery, await this.availableModels(harness)) : undefined
-    const selectedReasoning = selectedModel && reasoningQuery
-      ? resolveReasoning(reasoningQuery, selectedModel.availableThinkingLevels)
-      : undefined
-    const manager = this.options.agents[harness]
-    const runtime = await manager.start({
+    const { runtime: current, selectedModel, appliedReasoning } = await startAgentTask({
+      manager: this.options.agents[harness],
       cwd: project.primaryFolder,
-      ...(selectedModel ? { model: selectedModel.key } : {}),
-      ...(selectedReasoning ? { thinking: selectedReasoning } : {}),
+      prompt,
+      title,
+      modelQuery,
+      reasoningQuery,
+      availableModels: () => this.availableModels(harness),
+      missingSessionError: `${HARNESSES[project.harness].agentName} accepted the prompt but did not create a visible session. The task was not reported as started.`,
     })
-    let appliedReasoning = selectedReasoning
-    try {
-      if (!selectedModel && reasoningQuery) {
-        appliedReasoning = resolveReasoning(reasoningQuery, runtime.availableThinkingLevels ?? [])
-        await manager.command(runtime.runtimeId, { type: 'set_thinking_level', level: appliedReasoning })
-      }
-      await manager.command(runtime.runtimeId, { type: 'prompt', message: prompt })
-      if (title) await manager.command(runtime.runtimeId, { type: 'set_session_name', name: title }).catch(() => undefined)
-      await manager.command(runtime.runtimeId, { type: 'get_state' })
-    } catch (error) {
-      await manager.stop(runtime.runtimeId).catch(() => false)
-      throw error
-    }
-    const current = manager.list().find((candidate) => candidate.runtimeId === runtime.runtimeId) ?? runtime
-    if (!current.sessionFile) {
-      await manager.stop(runtime.runtimeId).catch(() => false)
-      throw new Error(`${HARNESSES[project.harness].agentName} accepted the prompt but did not create a visible session. The task was not reported as started.`)
-    }
     const task: VoiceTaskStarted = {
       projectId: project.id, projectName: project.name, harness: project.harness,
       runtimeId: current.runtimeId, sessionFile: current.sessionFile,
