@@ -130,7 +130,7 @@ export class RpcRuntime {
   ) {
     this.watchdogTimings = { ...DEFAULT_COMPACTION_WATCHDOG_TIMINGS, ...watchdogTimings }
     this.info = { runtimeId: this.runtimeId, harness: this.adapter.id, cwd, isStreaming: false, isCompacting: false, sessionActions: emptySessionActionSnapshot() }
-    this.eventForwarder = new AgentEventForwarder(this.runtimeId, onEvent)
+    this.eventForwarder = new AgentEventForwarder(this.runtimeId, onEvent, {}, this.adapter.agentName)
     // Every harness child is spawned with the authorized cwd as its working
     // directory. Adapters that declare spawnsInCwd (pi has no --cwd flag and
     // buckets its sessions by the process working directory) depend on this.
@@ -141,6 +141,8 @@ export class RpcRuntime {
       (line) => this.handleLine(line),
       (error) => this.failTransport(error),
       () => !this.stopped,
+      30_000,
+      this.adapter.agentName,
     )
     this.child.stdin.on('error', (error) => this.fail(error))
     this.child.once('error', (error) => this.fail(error))

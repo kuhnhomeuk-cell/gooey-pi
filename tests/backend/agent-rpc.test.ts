@@ -638,9 +638,25 @@ setInterval(() => {}, 1000)
     const onFailure = vi.fn()
     const transport = new FramedRpcTransport(child, () => undefined, onFailure, () => true, 50)
 
-    await expect(transport.enqueue('{"type":"stuck"}\n').done).rejects.toThrow('stopped reading RPC input')
+    await expect(transport.enqueue('{"type":"stuck"}\n').done).rejects.toThrow('Prime Agent stopped reading RPC input')
     expect(onFailure).toHaveBeenCalledTimes(1)
     expect((transport as unknown as { queuedWriteBytes: number }).queuedWriteBytes).toBe(0)
+  })
+
+  it('names OMP in a transport write-deadline error when that display name is injected', async () => {
+    const stdout = new PassThrough()
+    const stderr = new PassThrough()
+    const child = {
+      stdout, stderr,
+      stdin: { writable: true, write: () => true, end: () => undefined, destroy: () => undefined },
+    } as unknown as ChildProcessWithoutNullStreams
+    const onFailure = vi.fn()
+    const transport = new FramedRpcTransport(child, () => undefined, onFailure, () => true, 50, 'OMP')
+
+    await expect(transport.enqueue('{"type":"stuck"}\n').done).rejects.toThrow('OMP stopped reading RPC input')
+    expect(onFailure).toHaveBeenCalledTimes(1)
+    expect(String(onFailure.mock.calls[0]?.[0])).toContain('OMP stopped reading RPC input')
+    expect(String(onFailure.mock.calls[0]?.[0])).not.toContain('Prime Agent')
   })
 
   it('reports delivery-uncertain timeouts and consumes the late response instead of orphaning it', async () => {

@@ -1,8 +1,10 @@
+import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { PassThrough } from 'node:stream'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { AgentRpcManager, OMP_RPC_ADAPTER } from '../../electron/main/agent-rpc'
+import { type AgentEventForwarder, AgentRpcManager, OMP_RPC_ADAPTER } from '../../electron/main/agent-rpc'
 import type { ProviderCatalog } from '../../electron/main/agent-rpc'
 import {
   RPC_CHUNK_ASSEMBLY_INACTIVITY_MS,
@@ -10,6 +12,7 @@ import {
   type RpcChunkAssemblyTimer,
   type RpcChunkAssemblyTiming,
 } from '../../electron/main/agent-rpc/runtime'
+import { FramedRpcTransport } from '../../electron/main/agent-rpc/transport'
 import { RPC_READ_FRAME_LIMIT_BYTES } from '../../electron/main/jsonl-limits'
 import type { PrimeModelDescriptor } from '../../src/types/api'
 import { waitUntil } from '../helpers/wait'
@@ -788,5 +791,31 @@ describe('OMP RPC chunked frames', () => {
     expect(view.chunkAssemblySweepTimer).toBeNull()
     expect(timing.activeTimers()).toHaveLength(0)
     expect(events.some((event) => event.type === 'transport_limit')).toBe(false)
+  })
+})
+
+describe('OMP RPC display names', () => {
+  it('names OMP in a transport write-deadline error', async () => {
+    const child = {
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      stdin: { writable: true, write: () => true, end: () => undefined, destroy: () => undefined },
+    } as unknown as ChildProcessWithoutNullStreams
+    const onFailure = vi.fn()
+    const transport = new FramedRpcTransport(child, () => undefined, onFailure, () => true, 50, OMP_RPC_ADAPTER.agentName)
+
+    await expect(transport.enqueue('{"type":"stuck"}\n').done).rejects.toThrow('OMP stopped reading RPC input')
+    expect(String(onFailure.mock.calls[0]?.[0])).toContain('OMP stopped reading RPC input')
+    expect(String(onFailure.mock.calls[0]?.[0])).not.toContain('Prime Agent')
+  })
+
+  it('names OMP in event-limit reports from an OMP runtime', () => {
+    const { runtime, events } = directChunkRuntime()
+    const forwarder = (runtime as unknown as { eventForwarder: AgentEventForwarder }).eventForwarder
+    for (let index = 0; index < 501; index += 1) forwarder.emit({ type: 'message_update', index })
+
+    const report = events.find((event) => event.type === 'transport_limit')
+    expect(report).toMatchObject({ type: 'transport_limit', kind: 'count', error: 'OMP event rate exceeded the desktop limit' })
+    expect(String(report?.error)).not.toContain('Prime Agent')
   })
 })

@@ -29,6 +29,7 @@ export class FramedRpcTransport {
     private readonly onFatalTransportError: (error: unknown) => void,
     private readonly isAvailable: () => boolean,
     private readonly writeDeadlineMs = 30_000,
+    private readonly agentName = 'Prime Agent',
   ) {
     this.decoder = new StrictJsonlDecoder(onLine, RPC_READ_FRAME_LIMIT_BYTES)
     this.child.stdout.on('data', (chunk: Buffer) => {
@@ -84,7 +85,7 @@ export class FramedRpcTransport {
       // A child that stops reading stdin must fail the transport rather than
       // pin the write queue (and its byte budget) forever.
       const deadline = setTimeout(() => {
-        const stall = new Error('Prime Agent stopped reading RPC input')
+        const stall = new Error(`${this.agentName} stopped reading RPC input`)
         finish(stall)
         this.onFatalTransportError(stall)
       }, this.writeDeadlineMs)
