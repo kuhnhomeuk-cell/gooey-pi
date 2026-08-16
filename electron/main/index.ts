@@ -61,6 +61,13 @@ let shutdownStarted = false
 let shutdownApproved = false
 let confirmingShutdown = false
 let trustedRendererUrl = ''
+let agentEventSinkTrusted = false
+
+function refreshAgentEventTrust(renderer: WebContents): void {
+  agentEventSinkTrusted = !renderer.isDestroyed()
+    && isTrustedRendererUrl(renderer.getURL(), trustedRendererUrl)
+    && isTrustedRendererUrl(renderer.mainFrame.url, trustedRendererUrl)
+}
 let windowCreation: Promise<BrowserWindow | null> | null = null
 const keepTestWindowsHidden = process.env.PRIME_WORK_E2E_HIDE_WINDOWS === '1'
 
@@ -373,11 +380,15 @@ async function createWindow(): Promise<BrowserWindow | null> {
     // on every load rather than only at window creation.
     renderer.setZoomFactor(interfaceZoomFactor())
     if (isTrustedRendererUrl(renderer.getURL(), trustedRendererUrl)) ipc?.authorize(renderer)
+    refreshAgentEventTrust(renderer)
   })
   renderer.on('did-start-navigation', (_event, url, _isInPlace, isMainFrame) => {
-    if (isMainFrame && !isTrustedRendererUrl(url, trustedRendererUrl)) ipc?.revoke(rendererId)
+    if (isMainFrame && !isTrustedRendererUrl(url, trustedRendererUrl)) {
+      ipc?.revoke(rendererId)
+      agentEventSinkTrusted = false
+    }
   })
-  renderer.on('render-process-gone', () => ipc?.revoke(rendererId))
+  renderer.on('render-process-gone', () => { agentEventSinkTrusted = false; ipc?.revoke(rendererId) })
   let rendererLoaded = false
   let readyToShow = false
   window.once('ready-to-show', () => {
@@ -392,6 +403,7 @@ async function createWindow(): Promise<BrowserWindow | null> {
     if (!confirmingShutdown) requestShutdown(window, prompt)
   })
   window.on('closed', () => {
+    agentEventSinkTrusted = false
     ipc?.revoke(rendererId)
     if (mainWindow === window) mainWindow = null
   })
@@ -966,12 +978,11 @@ async function bootstrap(): Promise<void> {
   // runtimeId and RuntimeInfo carries the harness, so the renderer can route.
   const forwardAgentEvent = (envelope: PrimeEventEnvelope): void => {
     const renderer = mainWindow?.webContents
-    if (!shutdownStarted && renderer && !renderer.isDestroyed()
-      && isTrustedRendererUrl(renderer.getURL(), trustedRendererUrl)
-      && isTrustedRendererUrl(renderer.mainFrame.url, trustedRendererUrl)) {
+    if (!shutdownStarted && renderer && !renderer.isDestroyed() && agentEventSinkTrusted) {
       renderer.send('agent:event', envelope)
     }
   }
+  if (mainWindow && !mainWindow.isDestroyed()) refreshAgentEventTrust(mainWindow.webContents)
   agents.setEventSink(forwardAgentEvent)
   ompManager.setEventSink(forwardAgentEvent)
   piManager.setEventSink(forwardAgentEvent)

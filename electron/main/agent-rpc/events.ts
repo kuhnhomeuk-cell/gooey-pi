@@ -55,20 +55,20 @@ export class AgentEventForwarder {
     }
 
     const envelope: PrimeEventEnvelope = { runtimeId: this.runtimeId, event }
-    const bytes = this.serializedBytes(envelope)
-    if (bytes === null || bytes > this.limits.maxEnvelopeBytes) {
+    const serialized = this.serializeEnvelope(envelope)
+    if (serialized === null || serialized.bytes > this.limits.maxEnvelopeBytes) {
       this.reportLimit('envelope', `${this.agentName} event exceeded the desktop envelope byte limit`)
       return
     }
     if (!isRuntimeExit) {
       const reserve = Math.min(64 * 1024, Math.floor(this.limits.maxWindowBytes / 4))
       const byteLimit = critical ? this.limits.maxWindowBytes : this.limits.maxWindowBytes - reserve
-      if (this.windowBytes + bytes > byteLimit) {
+      if (this.windowBytes + serialized.bytes > byteLimit) {
         this.reportLimit('bytes', `${this.agentName} event byte rate exceeded the desktop limit`)
         return
       }
     }
-    this.windowBytes += bytes
+    this.windowBytes += serialized.bytes
     if (isRuntimeExit) this.runtimeExitDelivered = true
     this.onEvent(envelope)
   }
@@ -90,13 +90,18 @@ export class AgentEventForwarder {
     // agent is still running, so the renderer must reconcile the transcript
     // from disk rather than treat the turn as failed or finished.
     const envelope: PrimeEventEnvelope = { runtimeId: this.runtimeId, event: { type: 'transport_limit', kind, error } }
-    const bytes = this.serializedBytes(envelope)
-    if (bytes === null || bytes > this.limits.maxEnvelopeBytes || this.windowBytes + bytes > this.limits.maxWindowBytes) return
-    this.windowBytes += bytes
+    const serialized = this.serializeEnvelope(envelope)
+    if (serialized === null || serialized.bytes > this.limits.maxEnvelopeBytes || this.windowBytes + serialized.bytes > this.limits.maxWindowBytes) return
+    this.windowBytes += serialized.bytes
     this.onEvent(envelope)
   }
 
-  private serializedBytes(envelope: PrimeEventEnvelope): number | null {
-    try { return Buffer.byteLength(JSON.stringify(envelope), 'utf8') } catch { return null }
+  private serializeEnvelope(envelope: PrimeEventEnvelope): { json: string; bytes: number } | null {
+    try {
+      const json = JSON.stringify(envelope)
+      return { json, bytes: Buffer.byteLength(json, 'utf8') }
+    } catch {
+      return null
+    }
   }
 }
