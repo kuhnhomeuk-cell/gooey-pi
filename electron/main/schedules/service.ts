@@ -386,7 +386,7 @@ export class AutomationService {
     await this.store.update((state) => {
       const task = state.schedules.find((candidate) => candidate.id === snapshot.id)
       if (task?.status !== 'active' || task.nextRunAt !== scheduledFor) return
-      this.pushRun(task, run)
+      this.pushRun(state.schedules, task, run)
       const next = nextScheduleOccurrence(task.timing, now)
       if (next) task.nextRunAt = next
       else { task.nextRunAt = undefined; task.status = 'completed' }
@@ -420,7 +420,7 @@ export class AutomationService {
     await this.store.update((state) => {
       const current = state.schedules.find((candidate) => candidate.id === task.id)
       if (!current) throw new Error('Scheduled task was deleted before its run could start')
-      this.pushRun(current, run)
+      this.pushRun(state.schedules, current, run)
     })
     this.pending.push({ task: cloneTask(task), runId: run.id })
     this.changed({ taskId: task.id, reason: 'run' })
@@ -497,10 +497,10 @@ export class AutomationService {
     })
   }
 
-  private pushRun(task: AutomationScheduleRecord, run: ScheduleRunRecord): void {
+  private pushRun(schedules: AutomationScheduleRecord[], task: AutomationScheduleRecord, run: ScheduleRunRecord): void {
     task.runs.push(structuredClone(run))
     if (task.runs.length > MAX_RUNS_PER_TASK) task.runs.splice(0, task.runs.length - MAX_RUNS_PER_TASK)
-    const totalRuns = this.store.snapshot().schedules.reduce((sum, candidate) => sum + candidate.runs.length, 0)
+    const totalRuns = schedules.reduce((sum, candidate) => sum + candidate.runs.length, 0)
     if (totalRuns >= MAX_GLOBAL_RUNS && task.runs.length > 1) task.runs.shift()
   }
 

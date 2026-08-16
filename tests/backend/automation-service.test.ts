@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ScheduleExecution, ScheduleTarget } from '../../src/types/api'
-import { AutomationService } from '../../electron/main/schedules/service'
+import { AutomationService, ScheduleBlockedError } from '../../electron/main/schedules/service'
 import { JsonStateStore } from '../../electron/main/store'
 
 const dirs: string[] = []
@@ -290,5 +290,78 @@ describe('AutomationService', () => {
       process.off('unhandledRejection', onRejection)
       consoleError.mockRestore()
     }
+  })
+
+  it('records how many full store rewrites a manual, scheduled, and blocked run cost', async () => {
+    const countUpdates = (stateStore: JsonStateStore) => {
+      let writes = 0
+      const original = stateStore.update.bind(stateStore)
+      stateStore.update = ((mutator) => {
+        writes += 1
+        return original(mutator)
+      }) as typeof stateStore.update
+      return () => writes
+    }
+
+    const manualStore = store()
+    const manualWrites = countUpdates(manualStore)
+    const manual = new AutomationService(manualStore, {
+      validateTarget: async () => undefined,
+      validateExecution: async () => undefined,
+      run: async () => ({}),
+      now: () => new Date('2030-01-01T00:00:00Z'),
+    })
+    await manual.start()
+    const manualTask = await manual.create({ prompt: 'Manual', target, timing: onceAt('2030-01-02T00:00:00Z'), execution })
+    const afterCreate = manualWrites()
+    await manual.runNow(manualTask.id)
+    await eventually(() => expect(manual.get(manualTask.id).runs[0]?.status).toBe('succeeded'))
+    const manualRunWrites = manualWrites() - afterCreate
+    await manual.stop()
+
+    let clock = new Date('2030-01-01T00:00:00.000Z')
+    const scheduledStore = store()
+    const scheduledWrites = countUpdates(scheduledStore)
+    const scheduled = new AutomationService(scheduledStore, {
+      validateTarget: async () => undefined,
+      validateExecution: async () => undefined,
+      run: async () => ({}),
+      now: () => clock,
+    })
+    await scheduled.start()
+    await scheduled.create({ prompt: 'Scheduled', target, timing: onceAt('2030-01-01T00:00:01.000Z'), execution })
+    const afterScheduledCreate = scheduledWrites()
+    clock = new Date('2030-01-01T00:00:01.000Z')
+    try {
+      vi.useFakeTimers()
+      await vi.advanceTimersByTimeAsync(1_000)
+    } finally {
+      vi.useRealTimers()
+    }
+    await eventually(() => expect(scheduled.list()[0]?.runs.some((run) => run.status === 'succeeded')).toBe(true))
+    const scheduledRunWrites = scheduledWrites() - afterScheduledCreate
+    await scheduled.stop()
+
+    const blockedStore = store()
+    const blockedWrites = countUpdates(blockedStore)
+    const blocked = new AutomationService(blockedStore, {
+      validateTarget: async () => undefined,
+      validateExecution: async () => undefined,
+      run: async () => { throw new ScheduleBlockedError('target gone') },
+      now: () => new Date('2030-01-01T00:00:00Z'),
+    })
+    await blocked.start()
+    const blockedTask = await blocked.create({ prompt: 'Blocked', target, timing: onceAt('2030-01-02T00:00:00Z'), execution })
+    const afterBlockedCreate = blockedWrites()
+    await blocked.runNow(blockedTask.id)
+    await eventually(() => expect(blocked.get(blockedTask.id).status).toBe('blocked'))
+    const blockedRunWrites = blockedWrites() - afterBlockedCreate
+    await blocked.stop()
+
+    expect({ manualRunWrites, scheduledRunWrites, blockedRunWrites }).toEqual({
+      manualRunWrites: 3,
+      scheduledRunWrites: 4,
+      blockedRunWrites: 4,
+    })
   })
 })

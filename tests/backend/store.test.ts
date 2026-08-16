@@ -830,6 +830,22 @@ describe('JsonStateStore', () => {
     expect(readFileSync(join(dir, backup!), 'utf8')).toBe(legacyRaw)
   })
 
+  it('rejects a write that would exceed the same 64 MiB cap that governs reads', async () => {
+    const dir = makeDirectory()
+    const path = join(dir, 'state.json')
+    const store = new JsonStateStore(path)
+    await store.update((state) => { state.archivedSessions.push('seed') })
+    const before = readFileSync(path, 'utf8')
+
+    await expect(store.update((state) => {
+      state.archivedSessions.push('x'.repeat(64 * 1024 * 1024))
+    })).rejects.toThrow(/67108864-byte safe parse limit/)
+
+    expect(store.snapshot().archivedSessions).toEqual(['seed'])
+    expect(readFileSync(path, 'utf8')).toBe(before)
+    await store.beginShutdown()
+  })
+
   it('backs up corrupt state, returns defaults, and serializes recovery before later updates', async () => {
     const dir = makeDirectory()
     const path = join(dir, 'state.json')

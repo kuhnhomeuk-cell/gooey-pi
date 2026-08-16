@@ -907,11 +907,16 @@ export class JsonStateStore {
   }
 
   private async persist(state: DesktopState, requireDirectorySync = false): Promise<void> {
+    const serialized = `${JSON.stringify(state, null, 2)}\n`
+    const size = Buffer.byteLength(serialized)
+    if (size > MAX_STATE_FILE_BYTES) {
+      throw new Error(`Desktop state is ${size} bytes, which exceeds the ${MAX_STATE_FILE_BYTES}-byte safe parse limit. The update was not written.`)
+    }
     const temp = `${this.filePath}.${process.pid}.${randomUUID()}.tmp`
     try {
       const file = await this.fileSystem.open(temp, 'w', 0o600)
       try {
-        await file.writeFile(`${JSON.stringify(state, null, 2)}\n`, { encoding: 'utf8' })
+        await file.writeFile(serialized, { encoding: 'utf8' })
         await file.sync()
       } finally {
         await file.close()
