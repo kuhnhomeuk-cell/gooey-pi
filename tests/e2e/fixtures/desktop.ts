@@ -60,6 +60,15 @@ export async function stubCloseDialog(target: ElectronApplication): Promise<void
   })
 }
 
+export function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
 export function closePrompts(target: ElectronApplication): Promise<CapturedClosePrompt[]> {
   return target.evaluate(() => (globalThis as { __closePrompts?: unknown[] }).__closePrompts ?? []) as Promise<CapturedClosePrompt[]>
 }
@@ -163,7 +172,7 @@ function createHermeticFixture(activeSession = false): { userData: string; home:
       pinned: false, createdAt: '2025-01-01T00:00:00.000Z', lastOpenedAt: '2026-01-01T00:00:00.000Z',
       folderIdentities: { [canonicalProject]: identity(canonicalProject), [canonicalSecondary]: identity(canonicalSecondary) },
     }],
-    settings: { activeHarness: 'prime', browserHome: 'about:blank', telemetry: true },
+    settings: { activeHarness: 'prime', browserHome: 'about:blank', telemetry: true, locale: 'en' },
     archivedSessions: [],
     dismissedProjectPaths: [],
   }))
@@ -234,6 +243,7 @@ if (args[0] === 'status') {
   process.stdout.write(JSON.stringify([{ isDefault: true, status: 'current', socketPath: ${JSON.stringify(join(fixtureRoot, 'daemon.sock'))} }]) + '\\n')
   process.exit(0)
 }
+fs.writeFileSync(${JSON.stringify(join(fixtureRoot, 'prime-runtime.pid'))}, String(process.pid))
 fs.writeFileSync(${JSON.stringify(join(fixtureRoot, 'prime-runtime-args.json'))}, JSON.stringify(args))
 const send = (value) => process.stdout.write(JSON.stringify(value) + '\\n')
 let pendingPrompt
@@ -576,10 +586,12 @@ export function attachHermeticHooks(): void {
         for (const executable of [fixture.executable, fixture.ompExecutable, fixture.piExecutable]) renameSync(executable, `${executable}.pending`)
       }
       try {
+        const environment = hermeticEnvironment(fixture.home, fixture.executable, fixture.ompExecutable, fixture.piExecutable, fixture.cuaExecutable, liveInstall || noHarnesses)
+        if (testInfo.title === 'Command-Q backgrounds the window and menu-bar Open restores it') environment.PRIME_WORK_E2E_HIDE_WINDOWS = '0'
         app = await electron.launch({
           args: ['.', `--user-data-dir=${fixture.userData}`],
           cwd: process.cwd(),
-          env: hermeticEnvironment(fixture.home, fixture.executable, fixture.ompExecutable, fixture.piExecutable, fixture.cuaExecutable, liveInstall || noHarnesses) as Record<string, string>,
+          env: environment as Record<string, string>,
           timeout: 20_000,
         })
         app.context().on('page', attachDiagnostics)

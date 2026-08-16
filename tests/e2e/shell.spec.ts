@@ -1,7 +1,7 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { CURRENT_DESKTOP_STATE_FILENAME } from '../../electron/main/store'
-import { app, attachHermeticHooks, closePrompts, expect, fixtureRoot, markAppClosed, page, stubCloseDialog, test } from './fixtures/desktop'
+import { app, attachHermeticHooks, closePrompts, expect, fixtureRoot, markAppClosed, page, processIsAlive, stubCloseDialog, test } from './fixtures/desktop'
 
 test.describe('Prime Work shell', () => {
   test.describe.configure({ mode: 'parallel' })
@@ -322,6 +322,138 @@ test.describe('Prime Work shell', () => {
     })
     expect(colors.note).toBe(colors.canvas)
     expect(colors.note).not.toContain('rgba')
+  })
+
+  test('Command-Q backgrounds the window and menu-bar Open restores it', async () => {
+    test.skip(process.platform !== 'darwin', 'macOS menu-bar lifecycle')
+    await app!.evaluate(({ Menu }) => {
+      const scope = globalThis as { __trayOpen?: () => void }
+      const originalBuildFromTemplate = Menu.buildFromTemplate.bind(Menu)
+      Menu.buildFromTemplate = ((template) => {
+        const items = template as Array<{ label?: string; type?: string; click?: () => void }>
+        if (items.map((item) => item.label ?? item.type).join('|') === 'Open GooeyPi|separator|Settings...|Quit') {
+          scope.__trayOpen = items.find((item) => item.label === 'Open GooeyPi')?.click
+        }
+        return originalBuildFromTemplate(template)
+      }) as typeof Menu.buildFromTemplate
+    })
+    await page.evaluate(() => window.prime.settings.update({ keepRunningInBackground: true }))
+    await expect.poll(() => app!.evaluate(() => typeof (globalThis as { __trayOpen?: unknown }).__trayOpen)).toBe('function')
+    await expect.poll(() => app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.isVisible())).toBe(true)
+
+    await app!.evaluate(({ BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows()[0]
+      if (!window) throw new Error('Main window is missing')
+      window.focus()
+      window.webContents.focus()
+      window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Q', modifiers: ['meta'] })
+      window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Q', modifiers: ['meta'] })
+    })
+    await expect.poll(() => app!.evaluate(({ BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows()[0]
+      return { count: BrowserWindow.getAllWindows().length, visible: window?.isVisible(), destroyed: window?.isDestroyed() }
+    })).toEqual({ count: 1, visible: false, destroyed: false })
+    expect(app!.process().exitCode).toBeNull()
+
+    await app!.evaluate(() => {
+      const open = (globalThis as { __trayOpen?: () => void }).__trayOpen
+      if (!open) throw new Error('Menu-bar Open was not captured')
+      open()
+    })
+    await expect.poll(() => app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.isVisible())).toBe(true)
+    await expect(page.locator('.app-shell')).toBeVisible()
+  })
+
+  test('does not recreate the menu-bar item while Quit is shutting down', async () => {
+    test.skip(process.platform !== 'darwin', 'macOS menu-bar lifecycle')
+    const trayBuildsPath = join(fixtureRoot, 'tray-menu-builds.log')
+    await app!.evaluate(({ Menu }, markerPath) => {
+      const originalBuildFromTemplate = Menu.buildFromTemplate.bind(Menu)
+      Menu.buildFromTemplate = ((template) => {
+        const items = template as Array<{ label?: string; type?: string }>
+        if (items.map((item) => item.label ?? item.type).join('|') === 'Open GooeyPi|separator|Settings...|Quit') {
+          process.getBuiltinModule('node:fs').appendFileSync(markerPath, 'tray\n')
+        }
+        return originalBuildFromTemplate(template)
+      }) as typeof Menu.buildFromTemplate
+    }, trayBuildsPath)
+    await page.evaluate(() => window.prime.settings.update({ keepRunningInBackground: true }))
+    await expect.poll(() => existsSync(trayBuildsPath) ? readFileSync(trayBuildsPath, 'utf8').trim().split('\n').length : 0).toBe(1)
+
+    const closed = app!.waitForEvent('close', { timeout: 45_000 })
+    await app!.evaluate(({ app: electronApp }) => { electronApp.quit() })
+    await closed
+
+    expect(readFileSync(trayBuildsPath, 'utf8').trim().split('\n')).toHaveLength(1)
+    markAppClosed()
+  })
+
+  test('backgrounds active work and routes tray Quit through confirmation and cleanup', async () => {
+    test.skip(process.platform !== 'darwin', 'macOS menu-bar lifecycle')
+
+    // Capture the real Quit closure when enabling the setting creates the tray.
+    await app!.evaluate(({ Menu }) => {
+      const scope = globalThis as { __trayQuit?: () => void }
+      const originalBuildFromTemplate = Menu.buildFromTemplate.bind(Menu)
+      Menu.buildFromTemplate = ((template) => {
+        const items = template as Array<{ label?: string; type?: string; click?: () => void }>
+        if (items.map((item) => item.label ?? item.type).join('|') === 'Open GooeyPi|separator|Settings...|Quit') {
+          scope.__trayQuit = items.find((item) => item.label === 'Quit')?.click
+        }
+        return originalBuildFromTemplate(template)
+      }) as typeof Menu.buildFromTemplate
+    })
+    await page.evaluate(() => window.prime.settings.update({ keepRunningInBackground: true }))
+    await expect.poll(() => app!.evaluate(() => typeof (globalThis as { __trayQuit?: unknown }).__trayQuit)).toBe('function')
+
+    await page.locator('.session-row-wrap').filter({ hasText: 'Hermetic desktop fixture' }).locator('.session-row').click()
+    const composer = page.getByRole('combobox', { name: 'Message Prime' })
+    await composer.fill('stay busy while I background the window')
+    await composer.press('Enter')
+    await expect(page.getByRole('button', { name: 'Stop Prime' })).toBeVisible()
+    const runtimePidPath = join(fixtureRoot, 'prime-runtime.pid')
+    await expect.poll(() => existsSync(runtimePidPath)).toBe(true)
+    const runtimePid = Number(readFileSync(runtimePidPath, 'utf8'))
+    expect(runtimePid).toBeGreaterThan(0)
+    expect(processIsAlive(runtimePid)).toBe(true)
+    await stubCloseDialog(app!)
+
+    await app!.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0]?.show() })
+    await expect.poll(() => app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.isVisible())).toBe(true)
+    await app!.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0]?.close() })
+    await expect.poll(() => app!.evaluate(({ BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows()[0]
+      return { count: BrowserWindow.getAllWindows().length, visible: window?.isVisible(), destroyed: window?.isDestroyed() }
+    })).toEqual({ count: 1, visible: false, destroyed: false })
+    expect(await closePrompts(app!)).toEqual([])
+    expect(app!.process().exitCode).toBeNull()
+    expect(processIsAlive(runtimePid)).toBe(true)
+
+    const runningPrompt = {
+      message: 'Close GooeyPi while an agent is running?',
+      detail: 'An agent run is still in progress and will be stopped.',
+      buttons: ['Cancel', 'Close GooeyPi'],
+    }
+    await app!.evaluate(() => {
+      const quit = (globalThis as { __trayQuit?: () => void }).__trayQuit
+      if (!quit) throw new Error('Tray Quit was not captured')
+      quit()
+    })
+    await expect.poll(() => closePrompts(app!)).toEqual([runningPrompt])
+    await expect.poll(() => app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.isVisible())).toBe(false)
+    expect(app!.process().exitCode).toBeNull()
+    expect(processIsAlive(runtimePid)).toBe(true)
+
+    const closed = app!.waitForEvent('close', { timeout: 45_000 })
+    await app!.evaluate(() => {
+      const scope = globalThis as { __closeResponse?: number; __trayQuit?: () => void }
+      scope.__closeResponse = 1
+      if (!scope.__trayQuit) throw new Error('Tray Quit was not captured')
+      scope.__trayQuit()
+    })
+    await closed
+    await expect.poll(() => processIsAlive(runtimePid)).toBe(false)
+    markAppClosed()
   })
 
 })
